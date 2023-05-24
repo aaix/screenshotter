@@ -55,7 +55,7 @@ fn main() {
 
                 WM_TIMER => {}
 
-                _ => {debug!("Unknown message : {:#X}", msg.message)}
+                _ => {debug!("Unknown message : {:#X}", msg.message); state.has_frame = true;}
             }
         }
 
@@ -282,7 +282,7 @@ impl DXGIState {
         Ok(())
     }
 
-    fn paint_frame(&self) {
+    fn paint_frame(&mut self) {
         if self.screenshot.is_none() {
             return
         };
@@ -323,6 +323,8 @@ impl DXGIState {
             Ok(()) => {},
             Err(e) => {debug!("Error presenting {:?}", e)}
         };
+
+        self.has_frame = false;
         
     }
 
