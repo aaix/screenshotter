@@ -1,13 +1,47 @@
 #![windows_subsystem = "windows"]
 
-use std::{error::Error};
-
-use rand::Rng;
-use windows::{Win32::{UI::{Input::KeyboardAndMouse::{VK_SNAPSHOT, VIRTUAL_KEY, self, VK_F10}, WindowsAndMessaging::*}, Graphics::{Direct3D11::*, Dxgi::{*, Common::*}, Direct3D::*}, Foundation::{self, GetLastError}, System::LibraryLoader::LoadLibraryA}, core::ComInterface, s};
+use std::error::Error;
+use windows::{
+    Win32::{
+        UI::{
+            Input::KeyboardAndMouse::{
+                VK_SNAPSHOT,
+                VIRTUAL_KEY,
+                self
+            },
+            WindowsAndMessaging::*
+        },
+        Graphics::{
+            Direct3D11::*,
+            Dxgi::{
+                *,
+                Common::*
+            },
+            Direct3D::*
+        }, Foundation::{
+            self,
+            GetLastError
+        },
+        System::{
+            LibraryLoader::LoadLibraryA,
+            Diagnostics::Debug::OutputDebugStringW
+        },
+    },
+    core::{
+        ComInterface,
+        PCWSTR
+    },
+    s
+};
 
 macro_rules! debug {
     ($($t:tt)*) => {{
-        win_dbg_logger::output_debug_string(&(format!($($t)*) + "\n"));
+        unsafe {
+            OutputDebugStringW(
+                PCWSTR::from_raw(
+                    (&(format!($($t)*) + "\n\0").encode_utf16().collect::<Vec<u16>>()[0] as *const u16))
+            );
+        }
     }};
 }
 
@@ -23,8 +57,7 @@ fn main() {
     #[cfg(debug_assertions)]
     unsafe {LoadLibraryA(s!(r"C:\Program Files\Microsoft PIX\2305.10\WinPixGpuCapturer.dll")).unwrap();}
 
-
-    register_hotey(VK_F10);
+    register_hotey(VK_SNAPSHOT);
 
     let mut state = DXGIState::new().unwrap();
 
@@ -32,9 +65,9 @@ fn main() {
     debug!("output desc is {:?}", state.get_output_desc());
     debug!("Output dimensions are {:?}", state.get_output_desc().DesktopCoordinates.dimensions());
 
+    let mut msg = MSG::default();
     loop {
-        let mut msg = MSG::default();
-
+        
         if unsafe {GetMessageA(&mut msg as *mut _, None, 0, 0)}.as_bool() {
             // There is a message available
             match msg.message {
@@ -55,7 +88,11 @@ fn main() {
 
                 WM_TIMER => {}
 
-                _ => {debug!("Unknown message : {:#X}", msg.message); state.has_frame = true;}
+                WM_KEYDOWN | WM_KEYUP | WM_LBUTTONDOWN | WM_LBUTTONUP => {
+                    state.process_input(msg);
+                }
+
+                _ => {}
             }
         }
 
@@ -76,7 +113,51 @@ fn register_hotey(key: VIRTUAL_KEY) {
     };
 }
 
+struct InputState {
+    corner1: (i32, i32),
+    corner2: Option<(i32, i32)>
+}
+
+impl HasDimensions for InputState {
+    fn dimensions(&self) -> Dimensions {
+        let c1 = self.corner1;
+        if let Some(c2) = self.corner2 {
+
+            // c1 is left
+            if c1.0 < c2.0 {
+                //c1 is top
+                if c1.1 < c2.1 {
+                    Dimensions {width: (c2.0 - c1.0).try_into().unwrap(), height: (c2.1 - c1.1).try_into().unwrap(), x: c1.0, y: c1.1}
+                } // c2 is top
+                else {
+                    let width = (c2.0 - c1.0).try_into().unwrap();
+                    let height = (c1.1 - c2.1).try_into().unwrap();
+
+                    Dimensions {width, height, x: c2.0 - width as i32, y: c1.1 - height as i32}
+                }
+            } // c2 is left
+            else if c1.0 > c2.0 {
+                //c1 is top
+                if c1.1 < c2.1 {
+                    let width = (c1.0 - c2.0).try_into().unwrap();
+                    let height = (c2.1 - c1.1).try_into().unwrap();
+                    Dimensions {width, height, x: c1.0 - width as i32, y: c2.1 - height as i32}
+
+                } // c2 is top
+                else {
+                    Dimensions {width: (c1.0 - c2.0).try_into().unwrap(), height: (c1.1 - c2.1).try_into().unwrap(), x: c2.0, y: c2.1}
+                }
+            } // c1==c2
+            else {
+                Dimensions {width: 0, height: 0, x: c1.0, y: c1.1}
+            }
+        } else {
+            Dimensions {width: 0, height: 0, x: c1.0, y: c1.1}
+        }
+    }
+}
 struct DXGIState {
+    // graphics objects
     factory: IDXGIFactory7,
     device: ID3D11Device5,
     device_context: ID3D11DeviceContext4,
@@ -84,9 +165,11 @@ struct DXGIState {
     output: IDXGIOutput6,
     window: Foundation::HWND,
     swapchain: IDXGISwapChain4,
-    screenshot: Option<ID3D11Texture2D1>,
 
+    // processing state
+    screenshot: Option<ID3D11Texture2D1>,
     has_frame: bool,
+    input_state: Option<InputState>,
 }
 
 impl DXGIState {
@@ -201,6 +284,7 @@ impl DXGIState {
         };
         
 
+        unsafe {KeyboardAndMouse::SetCapture(window)};
 
         Ok(Self {
             factory,
@@ -211,7 +295,9 @@ impl DXGIState {
             window,
             swapchain,
             screenshot: None,
-            has_frame: true,
+            has_frame: false,
+            input_state: None
+
         })
     }
 
@@ -232,6 +318,16 @@ impl DXGIState {
 
     }
 
+    // WM_KEYDOWN | WM_KEYUP | WM_LBUTTONDOWN | WM_LBUTTONUP
+    fn process_input(&self, msg : MSG) {
+        match (msg.message, &self.input_state) {
+            (WM_LBUTTONDOWN, None) => {
+                // Select 
+            }
+            _ => {}
+        }
+    }
+
     fn capture_screen(&mut self) -> Result<(), Box<dyn Error>> {
         let ctx: IDXGIOutputDuplication = unsafe {
             self.output.DuplicateOutput1(
@@ -243,40 +339,53 @@ impl DXGIState {
             )?
         };
 
-        let resource: ID3D11Texture2D1 = Self::create_texture(
-            &self.device,
-            &self.get_output_desc().DesktopCoordinates.dimensions(),
-            D3D11_USAGE_DEFAULT,
-            D3D11_CPU_ACCESS_NONE,
-        )?;
+        let mut resource: Option<IDXGIResource> = None;
 
+
+        let mut timeouts: u32 = 0;
         let frame_info: DXGI_OUTDUPL_FRAME_INFO = unsafe {
             let mut frame_info: DXGI_OUTDUPL_FRAME_INFO = DXGI_OUTDUPL_FRAME_INFO::default();
-            ctx.AcquireNextFrame(
-                0,
-                &mut frame_info as *mut _,
-                &mut Some(resource.cast::<IDXGIResource>()?) as *mut _
-            )?;
+            while frame_info.LastPresentTime == 0 {
+                ctx.ReleaseFrame().ok();
+                match ctx.AcquireNextFrame(
+                    0,
+                    &mut frame_info as *mut _,
+                    &mut resource as *mut _,
+                ) {
+                    Ok(()) => {},
+                    Err(e) => {
+
+                        if e.code() == DXGI_ERROR_WAIT_TIMEOUT {
+                            timeouts += 1;
+
+                        if e.code().0 as i32 == DXGI_ERROR_ACCESS_LOST.0 {
+                            return self.capture_screen();
+                        };
+                        } else {
+                            debug!("Failed to Acquire next frame: {:?}", e);
+                        }
+
+                    },
+                };
+            }
             frame_info
         };
 
-        debug!("{:?}", frame_info);
-        unsafe {
-            let mut desc = D3D11_TEXTURE2D_DESC1::default();
-            resource.GetDesc1(&mut desc as *mut _);
-            debug!("{:?}", desc);
-        };
+        let resource = resource.ok_or("Resource was nullptr")?.cast::<ID3D11Texture2D1>()?;
 
-        let texture: ID3D11Texture2D1 = Self::create_texture(
+        debug!("timeouts : {}", timeouts);
+        debug!("{:?}", frame_info);
+
+        let screencap: ID3D11Texture2D1 = Self::create_texture(
             &self.device,
             &self.get_output_desc().DesktopCoordinates.dimensions(),
             D3D11_USAGE_DEFAULT,
             D3D11_CPU_ACCESS_NONE,
         )?;
 
-        unsafe {self.device_context.CopyResource(&texture, &resource)}
+        unsafe {self.device_context.CopyResource(&screencap, &resource)}
 
-        self.screenshot = Some(texture);
+        self.screenshot = Some(screencap);
 
 
         Ok(())
@@ -296,18 +405,16 @@ impl DXGIState {
 
         let resource = self.screenshot.as_ref().unwrap();
 
-        //unsafe {self.device_context.CopyResource(&frame,resource)};
+        unsafe {self.device_context.CopyResource(&frame,resource)};
 
 
+        #[cfg(any())]
         unsafe {
-            let mut data: Vec<u128> = vec![1; 3840 * 2160 * 4 /8];
-            let rng = rand::thread_rng().gen::<u128>();
+            let mut data: Vec<u64> = vec![1; 3840 * 2160 * 4 /4];
+            let rng = rand::thread_rng().gen::<u64>();
             data.fill(rng);
 
             self.device_context.UpdateSubresource(&frame, 0, None, data.as_ptr() as *const _, 3840 * 4, 3840 * 2160 * 4)
-
-
-
         }
         
 
