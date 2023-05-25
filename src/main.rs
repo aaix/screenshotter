@@ -29,13 +29,14 @@ use windows::{
     },
     core::{
         ComInterface,
-        PCWSTR
+        PCWSTR, PCSTR
     },
-    s
+    s, w
 };
 
 macro_rules! debug {
     ($($t:tt)*) => {{
+        #[allow(unused_unsafe)]
         unsafe {
             OutputDebugStringW(
                 PCWSTR::from_raw(
@@ -55,7 +56,11 @@ fn main() {
     debug!("Hello, world!");
 
     #[cfg(debug_assertions)]
-    unsafe {LoadLibraryA(s!(r"C:\Program Files\Microsoft PIX\2305.10\WinPixGpuCapturer.dll")).unwrap();}
+    {
+        if let Err(e) = unsafe {LoadLibraryA(s!(r"C:\Program Files\Microsoft PIX\2305.10\WinPixGpuCapturer.dll"))} {
+            debug!("Couldnt load PIX library {:?}", e)
+        };
+    };
 
     register_hotey(VK_SNAPSHOT);
 
@@ -92,7 +97,7 @@ fn main() {
                     state.process_input(msg);
                 }
 
-                _ => {}
+                _ => { state.has_frame = true}
             }
         }
 
@@ -113,6 +118,7 @@ fn register_hotey(key: VIRTUAL_KEY) {
     };
 }
 
+#[derive(Debug)]
 struct InputState {
     corner1: (i32, i32),
     corner2: Option<(i32, i32)>
@@ -282,7 +288,65 @@ impl DXGIState {
                 swapchain.unwrap().cast::<IDXGISwapChain4>()?
             )
         };
-        
+
+        let mut vertex_shader: ID3DBlob = unsafe {
+
+            let mut shader: Option<ID3DBlob> = None;
+            let mut error_blob : Option<ID3DBlob> = None;
+
+            #[cfg(debug_assertions)]
+            let shader_flags = Fxc::D3DCOMPILE_DEBUG;
+            #[cfg(not(debug_assertions))]
+            let shader_flags = 0;
+
+            if let Err(e) = Fxc::D3DCompileFromFile(
+            w!("Shaders.hlsl"),
+            None,
+            None,
+            s!("VS_main"),
+            s!("vs_5_0"),
+            shader_flags,
+            0,
+            &mut shader as *mut _,
+            Some(&mut error_blob as *mut _)
+            ) {
+                let blob = error_blob.unwrap();
+                return Err(
+                    String::from_utf16_lossy(
+                        std::slice::from_raw_parts(blob.GetBufferPointer() as *const u16, blob.GetBufferSize())
+                    ).into()
+                );
+            };
+            shader.unwrap()
+        };
+
+        let vertex_shader_blob = unsafe {Self::create_shader(
+            w!("Shaders.hlsl"),
+            s!("VS_main"),
+            s!("vs_5_0")
+        )}?;
+
+        let pixel_shader_blob = unsafe {Self::create_shader(
+            w!("Shaders.hlsl"),
+            s!("PX_main"),
+            s!("ps_5_0")
+        )}?;
+
+        let (vertex_shader, pixel_shader) =unsafe {
+            let mut ppvertexshader: Option<ID3D11VertexShader> = None;
+            let mut pppixelshader: Option<ID3D11PixelShader> = None;
+            device.CreateVertexShader(
+                blob_as_slice(&vertex_shader_blob),
+                None,
+                Some(&mut ppvertexshader as *mut _)
+            )?;
+            device.CreatePixelShader(
+                blob_as_slice(&pixel_shader_blob),
+                None,
+                Some(&mut pppixelshader as *mut _)
+            )?;
+            (ppvertexshader.unwrap(), pppixelshader.unwrap())
+        };
 
         unsafe {KeyboardAndMouse::SetCapture(window)};
 
@@ -299,6 +363,40 @@ impl DXGIState {
             input_state: None
 
         })
+    }
+
+    unsafe fn create_shader(
+        file_name: PCWSTR,
+        entry_point: PCSTR,
+        target: PCSTR,
+    ) -> Result<ID3DBlob, Box<dyn Error>> {
+        let mut shader: Option<ID3DBlob> = None;
+        let mut error_blob : Option<ID3DBlob> = None;
+
+        #[cfg(debug_assertions)]
+        let shader_flags = Fxc::D3DCOMPILE_DEBUG;
+        #[cfg(not(debug_assertions))]
+        let shader_flags = 0;
+
+        if let Err(e) = Fxc::D3DCompileFromFile(
+            file_name,
+            None,
+            None,
+            entry_point,
+            target,
+            shader_flags,
+            0,
+            &mut shader as *mut _,
+            Some(&mut error_blob as *mut _)
+        ) {
+            let blob = error_blob.unwrap();
+            return Err(
+                String::from_utf16_lossy(
+                    std::slice::from_raw_parts(blob.GetBufferPointer() as *const u16, blob.GetBufferSize() / 2)
+                ).into()
+            );
+        };
+        Ok(shader.unwrap())
     }
 
     fn get_output_desc(&self) -> DXGI_OUTPUT_DESC1 {
@@ -319,10 +417,21 @@ impl DXGIState {
     }
 
     // WM_KEYDOWN | WM_KEYUP | WM_LBUTTONDOWN | WM_LBUTTONUP
-    fn process_input(&self, msg : MSG) {
-        match (msg.message, &self.input_state) {
+    fn process_input(&mut self, msg : MSG) {
+        match (msg.message, &mut self.input_state) {
             (WM_LBUTTONDOWN, None) => {
-                // Select 
+                debug!("Point1 : {:?}", msg.pt);
+                self.input_state = Some(InputState {
+                    corner1 : (msg.pt.x, msg.pt.y),
+                    corner2: None
+                });
+
+            },
+
+            (WM_LBUTTONUP, Some(state)) => {
+                state.corner2 = Some((msg.pt.x, msg.pt.y));
+                debug!("final rectangle : {:?}", state.dimensions());
+                self.input_state = None;
             }
             _ => {}
         }
@@ -494,5 +603,14 @@ impl HasDimensions for Foundation::RECT {
             x: self.left,
             y: self.top
         }
+    }
+}
+
+fn blob_as_slice(blob: &ID3DBlob) -> &[u8] {
+    unsafe {
+        std::slice::from_raw_parts(
+            blob.GetBufferPointer() as *const u8,
+            blob.GetBufferSize()
+        )
     }
 }
