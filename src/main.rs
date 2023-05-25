@@ -7,7 +7,7 @@ use windows::{
             Input::KeyboardAndMouse::{
                 VK_SNAPSHOT,
                 VIRTUAL_KEY,
-                self
+                self, VK_ESCAPE
             },
             WindowsAndMessaging::*
         },
@@ -79,6 +79,7 @@ fn main() {
                 WM_HOTKEY => {
                     state.capture_screen().unwrap();
                     state.show_window();
+                    state.paint_frame();
                 },
 
                 WM_PAINT => {
@@ -97,7 +98,8 @@ fn main() {
                     state.process_input(msg);
                 }
 
-                _ => { state.has_frame = true}
+                // redraw occasionally
+                _ => {}
             }
         }
 
@@ -171,6 +173,7 @@ struct DXGIState {
     output: IDXGIOutput6,
     window: Foundation::HWND,
     swapchain: IDXGISwapChain4,
+    render_target: ID3D11Texture2D1,
 
     // processing state
     screenshot: Option<ID3D11Texture2D1>,
@@ -289,37 +292,6 @@ impl DXGIState {
             )
         };
 
-        let mut vertex_shader: ID3DBlob = unsafe {
-
-            let mut shader: Option<ID3DBlob> = None;
-            let mut error_blob : Option<ID3DBlob> = None;
-
-            #[cfg(debug_assertions)]
-            let shader_flags = Fxc::D3DCOMPILE_DEBUG;
-            #[cfg(not(debug_assertions))]
-            let shader_flags = 0;
-
-            if let Err(e) = Fxc::D3DCompileFromFile(
-            w!("Shaders.hlsl"),
-            None,
-            None,
-            s!("VS_main"),
-            s!("vs_5_0"),
-            shader_flags,
-            0,
-            &mut shader as *mut _,
-            Some(&mut error_blob as *mut _)
-            ) {
-                let blob = error_blob.unwrap();
-                return Err(
-                    String::from_utf16_lossy(
-                        std::slice::from_raw_parts(blob.GetBufferPointer() as *const u16, blob.GetBufferSize())
-                    ).into()
-                );
-            };
-            shader.unwrap()
-        };
-
         let vertex_shader_blob = unsafe {Self::create_shader(
             w!("Shaders.hlsl"),
             s!("VS_main"),
@@ -328,7 +300,7 @@ impl DXGIState {
 
         let pixel_shader_blob = unsafe {Self::create_shader(
             w!("Shaders.hlsl"),
-            s!("PX_main"),
+            s!("PS_main"),
             s!("ps_5_0")
         )}?;
 
@@ -348,7 +320,131 @@ impl DXGIState {
             (ppvertexshader.unwrap(), pppixelshader.unwrap())
         };
 
-        unsafe {KeyboardAndMouse::SetCapture(window)};
+        let vertices: [Vertex; 4] = [
+            Vertex ([-1.0,  1.0], [0.0, 0.0]),
+            Vertex ([1.0, 1.0], [1.0, 0.0]),
+            Vertex ([-1.0 , -1.0], [0.0, 1.0]),
+            Vertex ([1.0, -1.0], [1.0, 1.0])
+        ];
+
+
+        let vertex_buffer = unsafe {
+            let mut buffer: Option<ID3D11Buffer> = None;
+            device.CreateBuffer(
+                &D3D11_BUFFER_DESC {
+                    ByteWidth: std::mem::size_of_val(&vertices) as u32,
+                    Usage: D3D11_USAGE_DEFAULT,
+                    BindFlags: D3D11_BIND_VERTEX_BUFFER,
+                    CPUAccessFlags: D3D11_CPU_ACCESS_NONE,
+                    MiscFlags: D3D11_RESOURCE_MISC_FLAG(0),
+                    StructureByteStride: 0,
+                } as *const _,
+                Some(&D3D11_SUBRESOURCE_DATA {
+                    pSysMem: (&vertices as *const _) as *const _,
+                    SysMemPitch: std::mem::size_of_val(&vertices) as u32,
+                    SysMemSlicePitch: 0,
+                } as *const _),
+                Some(&mut buffer as *mut _)
+            )?;
+            buffer.unwrap()
+        };
+
+        let input_layout = unsafe {
+            let mut layout: Option<ID3D11InputLayout> = None;
+            device.CreateInputLayout(
+                &[
+                    D3D11_INPUT_ELEMENT_DESC {
+                        SemanticName: s!("POSITION"),
+                        SemanticIndex: 0,
+                        Format: DXGI_FORMAT_R32G32_FLOAT,
+                        InputSlot: 0,
+                        AlignedByteOffset: 0,
+                        InputSlotClass: D3D11_INPUT_PER_VERTEX_DATA,
+                        InstanceDataStepRate: 0,
+                    },
+                    D3D11_INPUT_ELEMENT_DESC {
+                        SemanticName: s!("TEXCOORD"),
+                        SemanticIndex: 0,
+                        Format: DXGI_FORMAT_R32G32_FLOAT,
+                        InputSlot: 0,
+                        AlignedByteOffset: 8, // 2 f32s after start
+                        InputSlotClass: D3D11_INPUT_PER_VERTEX_DATA,
+                        InstanceDataStepRate: 0,
+                    },
+                ],
+                blob_as_slice(&vertex_shader_blob),
+                Some(&mut layout as *mut _)
+            )?;
+            layout.unwrap()
+        };
+
+        let render_target = Self::create_texture(
+            &device,
+            &dimensions,
+            D3D11_USAGE_DEFAULT,
+            D3D11_CPU_ACCESS_NONE,
+            D3D11_BIND_RENDER_TARGET
+        ).unwrap();
+
+        let render_target_view = unsafe {
+            let mut target: Option<ID3D11RenderTargetView> = None;
+            device.CreateRenderTargetView(
+                &render_target,
+                None,
+                Some(&mut target as *mut _)
+            )?;
+            target.unwrap()
+        };
+
+        unsafe {
+            device_context.OMSetRenderTargets(
+                Some(&[
+                    Some(render_target_view)
+                ]),
+                None
+            )
+        }
+
+        unsafe {
+            device_context.RSSetViewports(
+                Some(&[D3D11_VIEWPORT {
+                    TopLeftX: 0.0,
+                    TopLeftY: 0.0,
+                    Width: dimensions.width as f32,
+                    Height: dimensions.height as f32,
+                    MinDepth: 0.0,
+                    MaxDepth: 1.0,
+                }])
+            );
+        };
+
+
+        unsafe {
+            device_context.IASetInputLayout(&input_layout);
+        }
+
+
+        unsafe {
+            device_context.IASetVertexBuffers(
+                0,
+                1,
+                Some(&Some(vertex_buffer) as *const _),
+                Some(&(std::mem::size_of::<Vertex>() as u32) as *const _),
+                Some(&0u32 as *const _),
+            );
+        };
+
+        unsafe {
+            device_context.VSSetShader(&vertex_shader, None);
+            device_context.PSSetShader(&pixel_shader, None);
+        };
+
+        
+        unsafe {
+            device_context.IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        };
+
+
 
         Ok(Self {
             factory,
@@ -358,6 +454,7 @@ impl DXGIState {
             output,
             window,
             swapchain,
+            render_target,
             screenshot: None,
             has_frame: false,
             input_state: None
@@ -389,11 +486,15 @@ impl DXGIState {
             &mut shader as *mut _,
             Some(&mut error_blob as *mut _)
         ) {
-            let blob = error_blob.unwrap();
+
+            let blob = match error_blob {
+                Some(b) => b,
+                None => return Err(Box::new(e)),
+            };
+
+            debug!("{:?} - {}", blob.GetBufferPointer(), blob.GetBufferSize());
             return Err(
-                String::from_utf16_lossy(
-                    std::slice::from_raw_parts(blob.GetBufferPointer() as *const u16, blob.GetBufferSize() / 2)
-                ).into()
+                PCSTR::from_raw(blob.GetBufferPointer() as *const u8).to_string()?.into()
             );
         };
         Ok(shader.unwrap())
@@ -408,10 +509,14 @@ impl DXGIState {
     }
 
     fn show_window(&self) -> bool {
-        unsafe {ShowWindow(self.window, SW_SHOW)}.as_bool()
+        let res = unsafe {ShowWindow(self.window, SW_SHOW)}.as_bool();
+        unsafe {SetForegroundWindow(self.window)};
+        unsafe {KeyboardAndMouse::SetCapture(self.window)};
+        res
     }
 
     fn hide_window(&self) -> bool {
+        unsafe {KeyboardAndMouse::ReleaseCapture()};
         unsafe {ShowWindow(self.window, SW_HIDE)}.as_bool()
 
     }
@@ -426,12 +531,25 @@ impl DXGIState {
                     corner2: None
                 });
 
+                self.has_frame = true;
             },
 
             (WM_LBUTTONUP, Some(state)) => {
                 state.corner2 = Some((msg.pt.x, msg.pt.y));
                 debug!("final rectangle : {:?}", state.dimensions());
                 self.input_state = None;
+                self.hide_window();
+            }
+
+            (WM_KEYUP, Some(_)) => {
+                if msg.wParam.0 == VK_ESCAPE.0 as usize{
+                    self.input_state = None;
+                } 
+                
+            }
+
+            (WM_MOUSEMOVE, Some(_)) => {
+                self.has_frame = true;
             }
             _ => {}
         }
@@ -457,7 +575,7 @@ impl DXGIState {
             while frame_info.LastPresentTime == 0 {
                 ctx.ReleaseFrame().ok();
                 match ctx.AcquireNextFrame(
-                    0,
+                    1,
                     &mut frame_info as *mut _,
                     &mut resource as *mut _,
                 ) {
@@ -490,13 +608,30 @@ impl DXGIState {
             &self.get_output_desc().DesktopCoordinates.dimensions(),
             D3D11_USAGE_DEFAULT,
             D3D11_CPU_ACCESS_NONE,
+            D3D11_BIND_SHADER_RESOURCE,
         )?;
 
         unsafe {self.device_context.CopyResource(&screencap, &resource)}
 
+        // set the pipeline view
+
+        let texture_view = unsafe {
+            let mut view: Option<ID3D11ShaderResourceView> = None;
+            self.device.CreateShaderResourceView(&screencap, None, Some(&mut view as *mut _))?;
+            view.unwrap()
+        };
+
+        unsafe {
+            self.device_context.PSSetShaderResources(
+                0,
+                Some(&[
+                    Some(texture_view),
+                    None
+                ])
+            );
+        };
+
         self.screenshot = Some(screencap);
-
-
         Ok(())
     }
 
@@ -505,34 +640,26 @@ impl DXGIState {
             return
         };
 
-        let frame = Self::create_texture(
-            &self.device,
-            &self.get_output_desc().DesktopCoordinates.dimensions(),
-            D3D11_USAGE_DEFAULT,
-            D3D11_CPU_ACCESS_WRITE
-        ).unwrap();
+        // DRAW THE RENDER PIPELINE
+        unsafe {self.device_context.Draw(4, 0);}
 
-        let resource = self.screenshot.as_ref().unwrap();
+        let buffer: ID3D11Texture2D = unsafe {self.swapchain.GetBuffer::<ID3D11Texture2D>(0).unwrap()};
 
-        unsafe {self.device_context.CopyResource(&frame,resource)};
+        let input_state_view: ID3D11ShaderResourceView = unsafe {
+            unimplemented!();
+        };
 
-
-        #[cfg(any())]
-        unsafe {
-            let mut data: Vec<u64> = vec![1; 3840 * 2160 * 4 /4];
-            let rng = rand::thread_rng().gen::<u64>();
-            data.fill(rng);
-
-            self.device_context.UpdateSubresource(&frame, 0, None, data.as_ptr() as *const _, 3840 * 4, 3840 * 2160 * 4)
+        if let Some(input_state) = self.input_state {
+            unsafe {self.device_context.PSSetShaderResources(
+            1,
+            Some(&[
+                Some(input_state_view)
+            ])
+        )};
         }
-        
 
 
-        //TODO: modify frame here
-
-        let buffer = unsafe {self.swapchain.GetBuffer::<ID3D11Texture2D>(0).unwrap()};
-
-        unsafe {self.device_context.CopyResource(&buffer, &frame)}
+        unsafe {self.device_context.CopyResource(&buffer, &self.render_target)}
 
         // TODO: use mark dirty rects with present1
         match unsafe {self.swapchain.Present(1, 0)}.ok() {
@@ -548,7 +675,8 @@ impl DXGIState {
         device: &ID3D11Device5,
         dimensions: &Dimensions,
         usage: D3D11_USAGE,
-        cpu_access: D3D11_CPU_ACCESS_FLAG
+        cpu_access: D3D11_CPU_ACCESS_FLAG,
+        bind_flags: D3D11_BIND_FLAG,
     ) -> Result<ID3D11Texture2D1, Box<dyn Error>> {
         Ok(unsafe {
             let mut texture: Option<ID3D11Texture2D1> = None;
@@ -564,7 +692,7 @@ impl DXGIState {
                         Quality: 0
                     },
                     Usage: usage,
-                    BindFlags: D3D11_BIND_FLAG(0),
+                    BindFlags: bind_flags,
                     CPUAccessFlags: cpu_access,
                     MiscFlags: D3D11_RESOURCE_MISC_FLAG(0),
                     TextureLayout: {
@@ -595,6 +723,17 @@ struct Dimensions {
     y: i32,
 }
 
+impl Dimensions {
+    fn to_rect(&self) -> Foundation::RECT {
+        Foundation::RECT {
+            left: self.x,
+            top: self.y,
+            right: self.x + (self.width as i32),
+            bottom: self.y + (self.width as i32),
+        }
+    }
+}
+
 impl HasDimensions for Foundation::RECT {
     fn dimensions(&self) -> Dimensions {
         Dimensions {
@@ -614,3 +753,9 @@ fn blob_as_slice(blob: &ID3DBlob) -> &[u8] {
         )
     }
 }
+
+#[repr(C)]
+struct Vertex (
+    [f32; 2],
+    [f32; 2],
+);
