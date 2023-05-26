@@ -66,8 +66,6 @@ fn main() {
 
     let mut state = DXGIState::new().unwrap();
 
-
-    debug!("output desc is {:?}", state.get_output_desc());
     debug!("Output dimensions are {:?}", state.get_output_desc().DesktopCoordinates.dimensions());
 
     let mut msg = MSG::default();
@@ -94,12 +92,12 @@ fn main() {
 
                 WM_TIMER => {}
 
-                WM_KEYDOWN | WM_KEYUP | WM_LBUTTONDOWN | WM_LBUTTONUP => {
+                WM_KEYDOWN | WM_KEYUP | WM_LBUTTONDOWN | WM_LBUTTONUP | WM_MOUSEMOVE => {
                     state.process_input(msg);
                 }
 
                 // redraw occasionally
-                _ => {}
+                _ => {state.has_frame = true;}
             }
         }
 
@@ -179,6 +177,8 @@ struct DXGIState {
     screenshot: Option<ID3D11Texture2D1>,
     has_frame: bool,
     input_state: Option<InputState>,
+    state_resource: ID3D11Buffer,
+    use_dirty_rects: bool,
 }
 
 impl DXGIState {
@@ -238,7 +238,7 @@ impl DXGIState {
         let (device, device_context, swapchain) = unsafe {
 
             #[cfg(not(debug_assertions))]
-            let flags = D3D11_CREATE_DEVICE_SINGLETHREADED;
+            let flags = 0;
             
             #[cfg(debug_assertions)]
             let flags: D3D11_CREATE_DEVICE_FLAG = D3D11_CREATE_DEVICE_DEBUG;
@@ -292,6 +292,7 @@ impl DXGIState {
             )
         };
 
+        // shaders
         let vertex_shader_blob = unsafe {Self::create_shader(
             w!("Shaders.hlsl"),
             s!("VS_main"),
@@ -320,6 +321,8 @@ impl DXGIState {
             (ppvertexshader.unwrap(), pppixelshader.unwrap())
         };
 
+
+        // renderer
         let vertices: [Vertex; 4] = [
             Vertex ([-1.0,  1.0], [0.0, 0.0]),
             Vertex ([1.0, 1.0], [1.0, 0.0]),
@@ -437,6 +440,7 @@ impl DXGIState {
         unsafe {
             device_context.VSSetShader(&vertex_shader, None);
             device_context.PSSetShader(&pixel_shader, None);
+            device_context.PSSetSamplers(0, Some(&[None]));
         };
 
         
@@ -444,6 +448,34 @@ impl DXGIState {
             device_context.IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
         };
 
+        
+        // custom param
+
+        let state_resource: ID3D11Buffer = unsafe {
+            let mut buffer: Option<ID3D11Buffer> = None;
+            device.CreateBuffer(
+                &D3D11_BUFFER_DESC {
+                    ByteWidth: std::mem::size_of::<NormalisedRect>() as u32,
+                    Usage: D3D11_USAGE_DYNAMIC,
+                    BindFlags: D3D11_BIND_CONSTANT_BUFFER,
+                    CPUAccessFlags: D3D11_CPU_ACCESS_WRITE,
+                    MiscFlags: D3D11_RESOURCE_MISC_FLAG(0),
+                    StructureByteStride: 0,
+                } as *const _,
+                None,
+                Some(&mut buffer as *mut _),
+            )?;
+            buffer.unwrap()
+        };
+
+        unsafe {
+            device_context.PSSetConstantBuffers(
+                0,
+                Some(&[
+                    Some(state_resource.clone())
+                ])
+            )
+        };
 
 
         Ok(Self {
@@ -457,7 +489,9 @@ impl DXGIState {
             render_target,
             screenshot: None,
             has_frame: false,
-            input_state: None
+            input_state: None,
+            state_resource,
+            use_dirty_rects: false,
 
         })
     }
@@ -492,7 +526,6 @@ impl DXGIState {
                 None => return Err(Box::new(e)),
             };
 
-            debug!("{:?} - {}", blob.GetBufferPointer(), blob.GetBufferSize());
             return Err(
                 PCSTR::from_raw(blob.GetBufferPointer() as *const u8).to_string()?.into()
             );
@@ -525,7 +558,6 @@ impl DXGIState {
     fn process_input(&mut self, msg : MSG) {
         match (msg.message, &mut self.input_state) {
             (WM_LBUTTONDOWN, None) => {
-                debug!("Point1 : {:?}", msg.pt);
                 self.input_state = Some(InputState {
                     corner1 : (msg.pt.x, msg.pt.y),
                     corner2: None
@@ -536,19 +568,39 @@ impl DXGIState {
 
             (WM_LBUTTONUP, Some(state)) => {
                 state.corner2 = Some((msg.pt.x, msg.pt.y));
-                debug!("final rectangle : {:?}", state.dimensions());
+                let mut final_rect = state.dimensions().to_rect();
                 self.input_state = None;
+                self.use_dirty_rects = false;
                 self.hide_window();
+
+                final_rect.bottom+=1;
+                final_rect.right+=1;
+
+                self.process_final_rect(final_rect);
             }
 
             (WM_KEYUP, Some(_)) => {
                 if msg.wParam.0 == VK_ESCAPE.0 as usize{
                     self.input_state = None;
+                    self.use_dirty_rects = false;
+                    self.has_frame = true;
                 } 
                 
             }
 
-            (WM_MOUSEMOVE, Some(_)) => {
+            (WM_KEYUP, None) => {
+                if msg.wParam.0 == VK_ESCAPE.0 as usize{
+                    self.input_state = None;
+                    self.use_dirty_rects = false;
+                    self.hide_window();
+                } 
+            }
+
+            (WM_MOUSEMOVE, Some(state)) => {
+                state.corner2 = Some((msg.pt.x, msg.pt.y));
+                if msg.pt.y > 1080 {
+                    panic!("msg is bad {:?}", msg);
+                };
                 self.has_frame = true;
             }
             _ => {}
@@ -600,8 +652,9 @@ impl DXGIState {
 
         let resource = resource.ok_or("Resource was nullptr")?.cast::<ID3D11Texture2D1>()?;
 
-        debug!("timeouts : {}", timeouts);
-        debug!("{:?}", frame_info);
+        if timeouts > 0 {
+            debug!("captured frame after {} timeouts", timeouts);
+        }
 
         let screencap: ID3D11Texture2D1 = Self::create_texture(
             &self.device,
@@ -640,35 +693,77 @@ impl DXGIState {
             return
         };
 
+        // update renderer resources
+        // by map state to memory
+        unsafe {
+            let mut map = D3D11_MAPPED_SUBRESOURCE::default();
+            match self.device_context.Map(
+                &self.state_resource,
+                0,
+                D3D11_MAP_WRITE_DISCARD,
+                0,
+                Some(&mut map as *mut _)
+             ) {
+                Ok(()) => {
+                    let screen = self.get_output_desc().DesktopCoordinates.dimensions();
+                    let r = match &self.input_state {
+                        Some(state) => {
+                            NormalisedRect::new(state.dimensions().to_rect(), screen.width, screen.height)
+                        },
+                        None => {
+                            NormalisedRect::default()
+                        },
+                    };
+                    std::ptr::write(
+                        map.pData as *mut NormalisedRect,
+                        r
+                    );
+                    self.device_context.Unmap(&self.state_resource, 0);
+                },
+                Err(e) => {
+                    debug!("Couldn't map state buffer into cpu space : {:?}", e)
+                },
+            }
+        };
+
         // DRAW THE RENDER PIPELINE
         unsafe {self.device_context.Draw(4, 0);}
 
+        // copy render target to backbuffer
         let buffer: ID3D11Texture2D = unsafe {self.swapchain.GetBuffer::<ID3D11Texture2D>(0).unwrap()};
-
-        let input_state_view: ID3D11ShaderResourceView = unsafe {
-            unimplemented!();
-        };
-
-        if let Some(input_state) = self.input_state {
-            unsafe {self.device_context.PSSetShaderResources(
-            1,
-            Some(&[
-                Some(input_state_view)
-            ])
-        )};
-        }
-
-
         unsafe {self.device_context.CopyResource(&buffer, &self.render_target)}
 
-        // TODO: use mark dirty rects with present1
-        match unsafe {self.swapchain.Present(1, 0)}.ok() {
+        match {
+            if  self.use_dirty_rects && self.input_state.is_some() && self.input_state.as_ref().unwrap().dimensions().has_area() {
+                unsafe {
+                    self.swapchain.Present1(
+                        1,
+                        0,
+                        &DXGI_PRESENT_PARAMETERS {
+                            DirtyRectsCount: 1,
+                            pDirtyRects: &mut self.input_state.as_ref().unwrap().dimensions().to_rect() as *mut _,
+                            pScrollRect: std::ptr::null_mut(),
+                            pScrollOffset: std::ptr::null_mut(),
+                        } as *const _,
+                    )
+                }
+            } else {
+                unsafe {
+                    self.use_dirty_rects = true;
+                    self.swapchain.Present(1, 0)
+                }
+            }
+        }.ok() {
             Ok(()) => {},
             Err(e) => {debug!("Error presenting {:?}", e)}
         };
 
         self.has_frame = false;
         
+    }
+
+    fn process_final_rect(&self, rect: Foundation::RECT) {
+        debug!("FINAL RECT IS {:?}", rect);
     }
 
     fn create_texture(
@@ -716,6 +811,7 @@ trait HasDimensions {
     fn dimensions(&self) -> Dimensions;
 }
 #[derive(Debug)]
+#[repr(C)]
 struct Dimensions {
     width: u32,
     height: u32,
@@ -729,8 +825,12 @@ impl Dimensions {
             left: self.x,
             top: self.y,
             right: self.x + (self.width as i32),
-            bottom: self.y + (self.width as i32),
+            bottom: self.y + (self.height as i32),
         }
+    }
+
+    fn has_area(&self) -> bool {
+        self.width != 0 && self.height != 0
     }
 }
 
@@ -759,3 +859,31 @@ struct Vertex (
     [f32; 2],
     [f32; 2],
 );
+
+#[repr(C)]
+#[derive(Debug)]
+struct NormalisedRect {
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32
+}
+
+impl NormalisedRect {
+    fn new(rect: Foundation::RECT, width: u32, height: u32) -> Self {
+        let w: f32 = width as f32;
+        let h: f32 = height as f32;
+        Self {
+            left: rect.left as f32 / w,
+            top: rect.top as f32 / h,
+            right: rect.right as f32 / w,
+            bottom: rect.bottom as f32 / h,
+        }
+    }
+}
+
+impl Default for NormalisedRect {
+    fn default() -> Self {
+        NormalisedRect { left: 0.0, top: 0.0, right: 0.0, bottom: 0.0 }
+    }
+}
