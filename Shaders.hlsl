@@ -50,7 +50,7 @@ float4 PS_main(VertexOutput input) : SV_TARGET
     ) {
         return px;
     } else {
-       return float4(px.rgb * 0.35f, px.a); 
+       return float4(px.rgb * 0.35f, px.a);
     }
     
 }
