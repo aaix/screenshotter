@@ -1,6 +1,8 @@
-#![windows_subsystem = "windows"]
+//#![windows_subsystem = "windows"]
 
-use std::error::Error;
+
+use std::{error::Error};
+use png::{Encoder, self};
 use windows::{
     Win32::{
         UI::{
@@ -24,7 +26,9 @@ use windows::{
         },
         System::{
             LibraryLoader::LoadLibraryA,
-            Diagnostics::Debug::OutputDebugStringW
+            Diagnostics::Debug::OutputDebugStringW,
+            Memory,
+            DataExchange,
         },
     },
     core::{
@@ -66,6 +70,7 @@ fn main() {
 
     let mut state = DXGIState::new().unwrap();
 
+    debug!("{:?}", state.get_output_desc());
     debug!("Output dimensions are {:?}", state.get_output_desc().DesktopCoordinates.dimensions());
 
     let mut msg = MSG::default();
@@ -160,6 +165,10 @@ impl HasDimensions for InputState {
         } else {
             Dimensions {width: 0, height: 0, x: c1.0, y: c1.1}
         }
+    }
+
+    fn as_flat_box(&self) -> D3D11_BOX {
+        unimplemented!();
     }
 }
 struct DXGIState {
@@ -386,7 +395,8 @@ impl DXGIState {
             &dimensions,
             D3D11_USAGE_DEFAULT,
             D3D11_CPU_ACCESS_NONE,
-            D3D11_BIND_RENDER_TARGET
+            D3D11_BIND_RENDER_TARGET,
+            DXGI_FORMAT_R16G16B16A16_FLOAT
         ).unwrap();
 
         let render_target_view = unsafe {
@@ -576,7 +586,9 @@ impl DXGIState {
                 final_rect.bottom+=1;
                 final_rect.right+=1;
 
-                self.process_final_rect(final_rect);
+                if let Err(e) = self.process_final_rect(final_rect) {
+                    debug!("processing screenshot error : {:?}", e);
+                };
             }
 
             (WM_KEYUP, Some(_)) => {
@@ -598,9 +610,6 @@ impl DXGIState {
 
             (WM_MOUSEMOVE, Some(state)) => {
                 state.corner2 = Some((msg.pt.x, msg.pt.y));
-                if msg.pt.y > 1080 {
-                    panic!("msg is bad {:?}", msg);
-                };
                 self.has_frame = true;
             }
             _ => {}
@@ -662,6 +671,7 @@ impl DXGIState {
             D3D11_USAGE_DEFAULT,
             D3D11_CPU_ACCESS_NONE,
             D3D11_BIND_SHADER_RESOURCE,
+            DXGI_FORMAT_R16G16B16A16_FLOAT
         )?;
 
         unsafe {self.device_context.CopyResource(&screencap, &resource)}
@@ -762,8 +772,111 @@ impl DXGIState {
         
     }
 
-    fn process_final_rect(&self, rect: Foundation::RECT) {
-        debug!("FINAL RECT IS {:?}", rect);
+    fn process_final_rect(&self, rect: Foundation::RECT) -> Result<(), Box<dyn Error>> {
+
+        let dimensions = rect.dimensions();
+        debug!("FINAL RECT IS {:?} - ({}x{})", rect, dimensions.width, dimensions.height);
+
+
+        
+        let sub_texture = Self::create_texture(
+            &self.device,
+            &dimensions,
+            D3D11_USAGE_STAGING,
+            D3D11_CPU_ACCESS_READ,
+            D3D11_BIND_FLAG(0),
+            DXGI_FORMAT_R16G16B16A16_UINT,
+        ).unwrap();
+
+        unsafe {
+            self.device_context.CopySubresourceRegion(
+                &sub_texture,
+                0,
+                0,
+                0,
+                0,
+                self.screenshot.as_ref().unwrap(),
+                0,
+                Some(&rect.as_flat_box() as *const _)
+            );
+        };
+
+        let map = unsafe {
+            let mut pmappedresource = D3D11_MAPPED_SUBRESOURCE::default();
+            self.device_context.Map(
+                &sub_texture,
+                0,
+                D3D11_MAP_READ,
+                0,
+                Some(&mut pmappedresource as *mut _)
+            )?; 
+            pmappedresource
+        };
+
+        let px_data: &[u8] = unsafe {
+            debug!("{:?}", map);
+            std::slice::from_raw_parts(
+                map.pData as *const u8,
+                (map.RowPitch * dimensions.height) as usize
+            )
+        };
+
+
+        let mut data: Vec<u8> = Vec::with_capacity(px_data.len());
+        // write the pixels to the data buffer
+        {
+            let mut encoder = Encoder::new(&mut data, dimensions.width, dimensions.height);
+
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Sixteen);
+            let mut writer = match encoder.write_header() {
+                Ok(w) => w,
+                Err(e) => {
+                    unsafe { self.device_context.Unmap(&sub_texture, 0) };
+                    return Err(Box::new(e));
+                }
+            };
+
+
+            // our data has rows aligned to 16 bits
+            let res = writer.write_image_data_with_aligned_rows(px_data, 16);
+            unsafe {self.device_context.Unmap(&sub_texture, 0);};
+            res?;
+        }
+        debug!("Encoded image");
+
+        std::fs::write("img.png", &data);
+
+        // create global memory
+        unsafe {
+            let handle: Foundation::HGLOBAL = Memory::GlobalAlloc(Memory::GMEM_MOVEABLE, data.len())?;
+
+            if DataExchange::OpenClipboard(self.window).as_bool() {
+                DataExchange::EmptyClipboard();
+                let ptr = Memory::GlobalLock(handle);
+
+                if ptr.is_null() {
+                    DataExchange::CloseClipboard();
+                    Memory::GlobalFree(handle)?;
+                    return Err("Unable to lock global memory".into());
+                }
+                std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
+                Memory::GlobalUnlock(handle);
+
+
+                let format = {
+                    DataExchange::RegisterClipboardFormatA(s!("png"))
+
+                };
+
+                let res = DataExchange::SetClipboardData(format, Foundation::HANDLE(handle.0));
+                DataExchange::CloseClipboard();
+                res?;
+            }
+        }
+        debug!("copied to clipboard");
+
+        Ok(())
     }
 
     fn create_texture(
@@ -772,6 +885,7 @@ impl DXGIState {
         usage: D3D11_USAGE,
         cpu_access: D3D11_CPU_ACCESS_FLAG,
         bind_flags: D3D11_BIND_FLAG,
+        format: DXGI_FORMAT
     ) -> Result<ID3D11Texture2D1, Box<dyn Error>> {
         Ok(unsafe {
             let mut texture: Option<ID3D11Texture2D1> = None;
@@ -781,7 +895,7 @@ impl DXGIState {
                     Height: dimensions.height,
                     MipLevels: 1,
                     ArraySize: 1,
-                    Format: DXGI_FORMAT_R16G16B16A16_FLOAT,
+                    Format: format,
                     SampleDesc: DXGI_SAMPLE_DESC {
                         Count: 1,
                         Quality: 0
@@ -809,6 +923,7 @@ impl DXGIState {
 
 trait HasDimensions {
     fn dimensions(&self) -> Dimensions;
+    fn as_flat_box(&self) -> D3D11_BOX;
 }
 #[derive(Debug)]
 #[repr(C)]
@@ -837,11 +952,14 @@ impl Dimensions {
 impl HasDimensions for Foundation::RECT {
     fn dimensions(&self) -> Dimensions {
         Dimensions {
-            width: (self.right-self.left).try_into().unwrap(),
-            height: (self.bottom-self.top).try_into().unwrap(),
+            width: (self.right-self.left) as u32,
+            height: (self.bottom-self.top) as u32,
             x: self.left,
             y: self.top
         }
+    }
+    fn as_flat_box(&self) -> D3D11_BOX {
+        D3D11_BOX { left: self.left as u32, top: self.top as u32, front: 0, right: self.right as u32, bottom: self.bottom as u32, back: 1 }
     }
 }
 
