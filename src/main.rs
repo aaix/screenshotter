@@ -878,6 +878,11 @@ impl DXGIState {
             )
         };
 
+        let debug_slice: &[u64] = unsafe{ std::slice::from_raw_parts(px_data as *const _ as *const u64, px_data.len() / 8)};
+
+        for px in debug_slice {
+            debug!("{:#12X}", px);
+        }
 
         let mut data: Vec<u8> = Vec::with_capacity(px_data.len());
         // write the pixels to the data buffer
