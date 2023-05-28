@@ -1,3 +1,4 @@
 target/
 Cargo.lock
+img.png
 compiled_shaders/*.cso
