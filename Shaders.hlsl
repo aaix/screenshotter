@@ -36,7 +36,7 @@ cbuffer Constants : register(b0)
     Rect region;
 };
 
-// Pixel shader
+// Pixel renderer shader
 float4 PS_main(VertexOutput input) : SV_TARGET
 {
     
@@ -52,5 +52,14 @@ float4 PS_main(VertexOutput input) : SV_TARGET
     } else {
        return float4(px.rgb * 0.35f, px.a); 
     }
+    
+}
+
+uint4 PS_convert_main(VertexOutput input): SV_TARGET
+{
+    
+    float4 px = textureInput.Sample(samplerLinear, input.texcoord);
+
+    return uint4(px.rgba * 0xFFFF);
     
 }
