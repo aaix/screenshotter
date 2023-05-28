@@ -6,7 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-png = "0.17.8"
+png = { git = "https://github.com/aaix/image-png-rs"}
 
 [dependencies.windows]
 version = "0.48"
@@ -28,6 +28,3 @@ features= [
     "Win32_System_Memory",
     "Win32_System_DataExchange",
 ]
-
-[patch.crates-io]
-png = { git = "https://github.com/aaix/image-png-rs" }

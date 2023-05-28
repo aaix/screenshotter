@@ -33,10 +33,15 @@ use windows::{
     },
     core::{
         ComInterface,
-        PCWSTR, PCSTR
+        PCWSTR
     },
-    s, w
+    s
 };
+
+const VERTEX_SHADER_BYTECODE: &[u8] = include_bytes!("../compiled_shaders/VertexShader.cso");
+const PIXEL_SHADER_BYTECODE: &[u8] = include_bytes!("../compiled_shaders/PixelShader.cso");
+const PIXEL_FORMAT_CONVERSION_SHADER_BYTECODE: &[u8] = include_bytes!("../compiled_shaders/ConvertShader.cso");
+
 
 macro_rules! debug {
     ($($t:tt)*) => {{
@@ -181,6 +186,10 @@ struct DXGIState {
     window: Foundation::HWND,
     swapchain: IDXGISwapChain4,
     render_target: ID3D11Texture2D1,
+    render_target_view: ID3D11RenderTargetView,
+    render_source_view: Option<ID3D11ShaderResourceView>,
+    px_render_shader: ID3D11PixelShader,
+    px_conversion_shader: ID3D11PixelShader,
 
     // processing state
     screenshot: Option<ID3D11Texture2D1>,
@@ -301,33 +310,27 @@ impl DXGIState {
             )
         };
 
-        // shaders
-        let vertex_shader_blob = unsafe {Self::create_shader(
-            w!("Shaders.hlsl"),
-            s!("VS_main"),
-            s!("vs_5_0")
-        )}?;
 
-        let pixel_shader_blob = unsafe {Self::create_shader(
-            w!("Shaders.hlsl"),
-            s!("PS_main"),
-            s!("ps_5_0")
-        )}?;
-
-        let (vertex_shader, pixel_shader) =unsafe {
+        let (vertex_shader, pixel_shader, pixel_conversion_shader) =unsafe {
             let mut ppvertexshader: Option<ID3D11VertexShader> = None;
             let mut pppixelshader: Option<ID3D11PixelShader> = None;
+            let mut conversion_shader: Option<ID3D11PixelShader> = None;
             device.CreateVertexShader(
-                blob_as_slice(&vertex_shader_blob),
+                VERTEX_SHADER_BYTECODE,
                 None,
                 Some(&mut ppvertexshader as *mut _)
             )?;
             device.CreatePixelShader(
-                blob_as_slice(&pixel_shader_blob),
+                PIXEL_SHADER_BYTECODE,
                 None,
                 Some(&mut pppixelshader as *mut _)
             )?;
-            (ppvertexshader.unwrap(), pppixelshader.unwrap())
+            device.CreatePixelShader(
+                PIXEL_FORMAT_CONVERSION_SHADER_BYTECODE,
+                None,
+                Some(&mut conversion_shader as *mut _)
+            )?;
+            (ppvertexshader.unwrap(), pppixelshader.unwrap(), conversion_shader.unwrap())
         };
 
 
@@ -384,7 +387,7 @@ impl DXGIState {
                         InstanceDataStepRate: 0,
                     },
                 ],
-                blob_as_slice(&vertex_shader_blob),
+                VERTEX_SHADER_BYTECODE,
                 Some(&mut layout as *mut _)
             )?;
             layout.unwrap()
@@ -412,7 +415,7 @@ impl DXGIState {
         unsafe {
             device_context.OMSetRenderTargets(
                 Some(&[
-                    Some(render_target_view)
+                    Some(render_target_view.clone())
                 ]),
                 None
             )
@@ -497,6 +500,10 @@ impl DXGIState {
             window,
             swapchain,
             render_target,
+            render_target_view,
+            render_source_view: None,
+            px_render_shader: pixel_shader,
+            px_conversion_shader: pixel_conversion_shader,
             screenshot: None,
             has_frame: false,
             input_state: None,
@@ -506,42 +513,6 @@ impl DXGIState {
         })
     }
 
-    unsafe fn create_shader(
-        file_name: PCWSTR,
-        entry_point: PCSTR,
-        target: PCSTR,
-    ) -> Result<ID3DBlob, Box<dyn Error>> {
-        let mut shader: Option<ID3DBlob> = None;
-        let mut error_blob : Option<ID3DBlob> = None;
-
-        #[cfg(debug_assertions)]
-        let shader_flags = Fxc::D3DCOMPILE_DEBUG;
-        #[cfg(not(debug_assertions))]
-        let shader_flags = 0;
-
-        if let Err(e) = Fxc::D3DCompileFromFile(
-            file_name,
-            None,
-            None,
-            entry_point,
-            target,
-            shader_flags,
-            0,
-            &mut shader as *mut _,
-            Some(&mut error_blob as *mut _)
-        ) {
-
-            let blob = match error_blob {
-                Some(b) => b,
-                None => return Err(Box::new(e)),
-            };
-
-            return Err(
-                PCSTR::from_raw(blob.GetBufferPointer() as *const u8).to_string()?.into()
-            );
-        };
-        Ok(shader.unwrap())
-    }
 
     fn get_output_desc(&self) -> DXGI_OUTPUT_DESC1 {
         unsafe {
@@ -587,7 +558,7 @@ impl DXGIState {
                 final_rect.right+=1;
 
                 if let Err(e) = self.process_final_rect(final_rect) {
-                    debug!("processing screenshot error : {:?}", e);
+                    debug!("processing final rect (screenshot) error : {:?}", e);
                 };
             }
 
@@ -678,7 +649,7 @@ impl DXGIState {
 
         // set the pipeline view
 
-        let texture_view = unsafe {
+        let render_source_view = unsafe {
             let mut view: Option<ID3D11ShaderResourceView> = None;
             self.device.CreateShaderResourceView(&screencap, None, Some(&mut view as *mut _))?;
             view.unwrap()
@@ -688,12 +659,13 @@ impl DXGIState {
             self.device_context.PSSetShaderResources(
                 0,
                 Some(&[
-                    Some(texture_view),
+                    Some(render_source_view.clone()),
                     None
                 ])
             );
         };
 
+        self.render_source_view = Some(render_source_view);
         self.screenshot = Some(screencap);
         Ok(())
     }
@@ -782,10 +754,19 @@ impl DXGIState {
         let sub_texture = Self::create_texture(
             &self.device,
             &dimensions,
-            D3D11_USAGE_STAGING,
-            D3D11_CPU_ACCESS_READ,
-            D3D11_BIND_FLAG(0),
-            DXGI_FORMAT_R16G16B16A16_UINT,
+            D3D11_USAGE_DEFAULT,
+            D3D11_CPU_ACCESS_NONE,
+            D3D11_BIND_SHADER_RESOURCE,
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+        ).unwrap();
+
+        let final_texture_render_target = Self::create_texture(
+            &self.device,
+            &dimensions,
+            D3D11_USAGE_DEFAULT,
+            D3D11_CPU_ACCESS_NONE,
+            D3D11_BIND_RENDER_TARGET,
+            DXGI_FORMAT_R16G16B16A16_UINT
         ).unwrap();
 
         unsafe {
@@ -801,10 +782,86 @@ impl DXGIState {
             );
         };
 
+        unsafe {
+            //swap pipeline to conversion rendering
+
+            // create conversion target view
+            let conversion_target = {
+                let mut target: Option<ID3D11RenderTargetView> = None;
+                self.device.CreateRenderTargetView(
+                    &final_texture_render_target,
+                    None,
+                    Some(&mut target as *mut _)
+                )?;
+                target.unwrap()
+            };
+
+            // set px resource to sample from screencap
+
+            let conversion_resource_view = {
+                let mut view: Option<ID3D11ShaderResourceView> = None;
+                self.device.CreateShaderResourceView(
+                    &sub_texture,
+                    None,
+                    Some(&mut view as *mut _)
+                )?;
+                view.unwrap()
+            };
+
+            // use conversion pixel shaders
+            self.device_context.PSSetShader(&self.px_conversion_shader, None);
+
+            self.device_context.PSSetShaderResources(
+                0,
+                Some(&[
+                    Some(conversion_resource_view),
+                ])
+            );
+
+            // set render target to conversion view
+            self.device_context.OMSetRenderTargets(
+                Some(&[
+                    Some(conversion_target)
+                ]),
+                None
+            );
+
+            self.device_context.Draw(4, 0);
+
+            // convert pipeline back to normal rendering
+            self.device_context.PSSetShader(&self.px_render_shader, None);
+            self.device_context.OMSetRenderTargets(
+                Some(&[
+                    Some(self.render_target_view.clone())
+                ]),
+                None
+            );
+            self.device_context.PSSetShaderResources(
+                0,
+                Some(&[
+                    Some(self.render_source_view.clone().unwrap()),
+                    None
+                ])
+            );
+        }
+
+
+        let output_texture = Self::create_texture(
+            &self.device,
+            &dimensions,
+            D3D11_USAGE_STAGING,
+            D3D11_CPU_ACCESS_READ,
+            D3D11_BIND_FLAG(0),
+            DXGI_FORMAT_R16G16B16A16_UINT,
+        ).unwrap();
+
+        unsafe {self.device_context.CopyResource(&output_texture, &final_texture_render_target)};
+
+
         let map = unsafe {
             let mut pmappedresource = D3D11_MAPPED_SUBRESOURCE::default();
             self.device_context.Map(
-                &sub_texture,
+                &output_texture,
                 0,
                 D3D11_MAP_READ,
                 0,
@@ -832,15 +889,15 @@ impl DXGIState {
             let mut writer = match encoder.write_header() {
                 Ok(w) => w,
                 Err(e) => {
-                    unsafe { self.device_context.Unmap(&sub_texture, 0) };
+                    unsafe { self.device_context.Unmap(&output_texture, 0) };
                     return Err(Box::new(e));
                 }
             };
 
 
             // our data has rows aligned to 16 bits
-            let res = writer.write_image_data_with_aligned_rows(px_data, 16);
-            unsafe {self.device_context.Unmap(&sub_texture, 0);};
+            let res = writer.write_image_data_with_aligned_rows(px_data, 16, dimensions.width as usize);
+            unsafe {self.device_context.Unmap(&output_texture, 0);};
             res?;
         }
         debug!("Encoded image");
@@ -868,6 +925,8 @@ impl DXGIState {
                     DataExchange::RegisterClipboardFormatA(s!("png"))
 
                 };
+
+                debug!("Clipboard format is {}", format);
 
                 let res = DataExchange::SetClipboardData(format, Foundation::HANDLE(handle.0));
                 DataExchange::CloseClipboard();
@@ -904,13 +963,7 @@ impl DXGIState {
                     BindFlags: bind_flags,
                     CPUAccessFlags: cpu_access,
                     MiscFlags: D3D11_RESOURCE_MISC_FLAG(0),
-                    TextureLayout: {
-                        if cpu_access.0 != 0 {
-                            D3D11_TEXTURE_LAYOUT_ROW_MAJOR
-                        } else {
-                            D3D11_TEXTURE_LAYOUT_UNDEFINED
-                        }
-                    },
+                    TextureLayout: D3D11_TEXTURE_LAYOUT_UNDEFINED,
                 } as *const _,
                 None,
                 Some(&mut texture as *mut _),
@@ -960,15 +1013,6 @@ impl HasDimensions for Foundation::RECT {
     }
     fn as_flat_box(&self) -> D3D11_BOX {
         D3D11_BOX { left: self.left as u32, top: self.top as u32, front: 0, right: self.right as u32, bottom: self.bottom as u32, back: 1 }
-    }
-}
-
-fn blob_as_slice(blob: &ID3DBlob) -> &[u8] {
-    unsafe {
-        std::slice::from_raw_parts(
-            blob.GetBufferPointer() as *const u8,
-            blob.GetBufferSize()
-        )
     }
 }
 
