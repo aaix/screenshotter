@@ -453,7 +453,6 @@ impl DXGIState {
         unsafe {
             device_context.VSSetShader(&vertex_shader, None);
             device_context.PSSetShader(&pixel_shader, None);
-            device_context.PSSetSamplers(0, Some(&[None]));
         };
 
         
@@ -766,7 +765,7 @@ impl DXGIState {
             D3D11_USAGE_DEFAULT,
             D3D11_CPU_ACCESS_NONE,
             D3D11_BIND_RENDER_TARGET,
-            DXGI_FORMAT_R16G16B16A16_UINT
+            DXGI_FORMAT_R16G16B16A16_UNORM
         ).unwrap();
 
         unsafe {
@@ -808,12 +807,26 @@ impl DXGIState {
                 view.unwrap()
             };
 
+            // set viewport to right height
+            self.device_context.RSSetViewports(
+                Some(&[D3D11_VIEWPORT {
+                    TopLeftX: 0.0,
+                    TopLeftY: 0.0,
+                    Width: dimensions.width as f32,
+                    Height: dimensions.height as f32,
+                    MinDepth: 0.0,
+                    MaxDepth: 1.0,
+                }])
+            );
+
             // use conversion pixel shaders
             self.device_context.PSSetShader(&self.px_conversion_shader, None);
 
             self.device_context.PSSetShaderResources(
                 0,
                 Some(&[
+                    None,
+                    None,
                     Some(conversion_resource_view),
                 ])
             );
@@ -843,6 +856,17 @@ impl DXGIState {
                     None
                 ])
             );
+            let normal_dimensions = self.get_output_desc().DesktopCoordinates.dimensions();
+            self.device_context.RSSetViewports(
+                Some(&[D3D11_VIEWPORT {
+                    TopLeftX: 0.0,
+                    TopLeftY: 0.0,
+                    Width: normal_dimensions.width as f32,
+                    Height: normal_dimensions.height as f32,
+                    MinDepth: 0.0,
+                    MaxDepth: 1.0,
+                }])
+            );
         }
 
 
@@ -852,7 +876,7 @@ impl DXGIState {
             D3D11_USAGE_STAGING,
             D3D11_CPU_ACCESS_READ,
             D3D11_BIND_FLAG(0),
-            DXGI_FORMAT_R16G16B16A16_UINT,
+            DXGI_FORMAT_R16G16B16A16_UNORM,
         ).unwrap();
 
         unsafe {self.device_context.CopyResource(&output_texture, &final_texture_render_target)};
@@ -882,7 +906,9 @@ impl DXGIState {
             let debug_slice: &[u64] = unsafe{ std::slice::from_raw_parts(px_data as *const _ as *const u64, px_data.len() / 8)};
 
             for px in debug_slice {
-                debug!("0x{:016X}", px);
+                if *px != 0 {
+                    debug!("0x{:016X}", px);
+                }
             }
         };
 
@@ -930,7 +956,7 @@ impl DXGIState {
 
 
                 let format = {
-                    DataExchange::RegisterClipboardFormatA(s!("png"))
+                    DataExchange::RegisterClipboardFormatA(s!("PNG"))
 
                 };
 

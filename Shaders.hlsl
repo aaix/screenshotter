@@ -55,13 +55,15 @@ float4 PS_main(VertexOutput input) : SV_TARGET
     
 }
 
-Texture2D<float4> convertTextureInput : register(t0);
+Texture2D<float4> convertTextureInput : register(t2);
+SamplerState convertSamplerLinear : register(s1);
 
-uint4 PS_convert_main(VertexOutput input): SV_TARGET
+
+unorm float4 PS_convert_main(VertexOutput input): SV_TARGET
 {
     
-    float4 px = convertTextureInput.Sample(samplerLinear, input.texcoord);
+    float4 px = convertTextureInput.Sample(convertSamplerLinear, input.texcoord);
 
-    return uint4(px.rgba * 0xFFFF);
-    
+    return px; //uint4(px.rgba * 0xFFFF);
+
 }

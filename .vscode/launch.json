@@ -16,7 +16,10 @@
             "environment": [
                 {"name": "SERVICE_ACCOUNT", "value": "creds.json"}
             ],
-            "requireExactSource": false
+            "requireExactSource": false,
+            "presentation": {
+                "focus": false,
+            }
             
         },
 
