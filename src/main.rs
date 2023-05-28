@@ -821,6 +821,11 @@ impl DXGIState {
             )
         };
 
+        let debug_slice: &[u64] = unsafe{ std::slice::from_raw_parts(px_data as *const _ as *const u64, px_data.len() / 8)};
+
+        for px in debug_slice {
+            debug!("{:#12X}", px);
+        }
 
         let mut data: Vec<u8> = Vec::with_capacity(px_data.len());
         // write the pixels to the data buffer
@@ -839,7 +844,7 @@ impl DXGIState {
 
 
             // our data has rows aligned to 16 bits
-            let res = writer.write_image_data_with_aligned_rows(px_data, 16);
+            let res = writer.write_image_data_with_aligned_rows(px_data, 16, dimensions.width as usize);
             unsafe {self.device_context.Unmap(&sub_texture, 0);};
             res?;
         }
