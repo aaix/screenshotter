@@ -871,18 +871,21 @@ impl DXGIState {
         };
 
         let px_data: &[u8] = unsafe {
-            debug!("{:?}", map);
             std::slice::from_raw_parts(
                 map.pData as *const u8,
                 (map.RowPitch * dimensions.height) as usize
             )
         };
 
-        let debug_slice: &[u64] = unsafe{ std::slice::from_raw_parts(px_data as *const _ as *const u64, px_data.len() / 8)};
+        // only debug print if there are not 4 million pixels lol
+        if (dimensions.width * dimensions.height) <= 256 {
+            let debug_slice: &[u64] = unsafe{ std::slice::from_raw_parts(px_data as *const _ as *const u64, px_data.len() / 8)};
 
-        for px in debug_slice {
-            debug!("{:#12X}", px);
-        }
+            for px in debug_slice {
+                debug!("0x{:016X}", px);
+            }
+        };
+
 
         let mut data: Vec<u8> = Vec::with_capacity(px_data.len());
         // write the pixels to the data buffer

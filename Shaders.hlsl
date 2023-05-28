@@ -62,6 +62,6 @@ uint4 PS_convert_main(VertexOutput input): SV_TARGET
     
     float4 px = convertTextureInput.Sample(samplerLinear, input.texcoord);
 
-    return uint4(px.rgba);
+    return uint4(px.rgba * 0xFFFF);
     
 }
