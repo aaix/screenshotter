@@ -56,14 +56,18 @@ float4 PS_main(VertexOutput input) : SV_TARGET
 }
 
 Texture2D<float4> convertTextureInput : register(t2);
-SamplerState convertSamplerLinear : register(s1);
+SamplerState convertSamplerLinear : register(s0);
 
 
-unorm float4 PS_convert_main(VertexOutput input): SV_TARGET
+uint4 PS_convert_main(VertexOutput input): SV_TARGET
 {
     
-    float4 px = convertTextureInput.Sample(convertSamplerLinear, input.texcoord);
+    unorm float4 px = convertTextureInput.Sample(convertSamplerLinear, input.texcoord);
+    // we need to swap endianness aswell
 
-    return px; //uint4(px.rgba * 0xFFFF);
+    uint4 px_int = uint4(px.rgba * 65535.0);
+
+
+    return uint4(((px_int.rgba << 4) | px_int.rgba & 0xF0) >> 4);
 
 }

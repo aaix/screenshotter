@@ -333,6 +333,26 @@ impl DXGIState {
             (ppvertexshader.unwrap(), pppixelshader.unwrap(), conversion_shader.unwrap())
         };
 
+        let sampler = unsafe {
+            let mut ppsamplerstate: Option<ID3D11SamplerState> = None;
+            device.CreateSamplerState(
+                &D3D11_SAMPLER_DESC {
+                    Filter: D3D11_FILTER_ANISOTROPIC,
+                    AddressU: D3D11_TEXTURE_ADDRESS_BORDER,
+                    AddressV: D3D11_TEXTURE_ADDRESS_BORDER,
+                    AddressW: D3D11_TEXTURE_ADDRESS_BORDER,
+                    MipLODBias: 0.0,
+                    MaxAnisotropy: 1,
+                    ComparisonFunc: D3D11_COMPARISON_NEVER,
+                    BorderColor: [0.0; 4],
+                    MinLOD: D3D11_FLOAT32_MAX,
+                    MaxLOD: -D3D11_FLOAT32_MAX,
+                } as *const _,
+                Some(&mut ppsamplerstate as *mut _)
+            )?;
+            ppsamplerstate.unwrap()
+        };
+
 
         // renderer
         let vertices: [Vertex; 4] = [
@@ -453,6 +473,7 @@ impl DXGIState {
         unsafe {
             device_context.VSSetShader(&vertex_shader, None);
             device_context.PSSetShader(&pixel_shader, None);
+            //device_context.PSSetSamplers(0, Some(&[Some(sampler)]));
         };
 
         
@@ -629,6 +650,8 @@ impl DXGIState {
             frame_info
         };
 
+        debug!("caputed frame : {:?}", frame_info);
+
         let resource = resource.ok_or("Resource was nullptr")?.cast::<ID3D11Texture2D1>()?;
 
         if timeouts > 0 {
@@ -765,7 +788,7 @@ impl DXGIState {
             D3D11_USAGE_DEFAULT,
             D3D11_CPU_ACCESS_NONE,
             D3D11_BIND_RENDER_TARGET,
-            DXGI_FORMAT_R16G16B16A16_UNORM
+            DXGI_FORMAT_R16G16B16A16_UINT
         ).unwrap();
 
         unsafe {
@@ -876,7 +899,7 @@ impl DXGIState {
             D3D11_USAGE_STAGING,
             D3D11_CPU_ACCESS_READ,
             D3D11_BIND_FLAG(0),
-            DXGI_FORMAT_R16G16B16A16_UNORM,
+            DXGI_FORMAT_R16G16B16A16_UINT,
         ).unwrap();
 
         unsafe {self.device_context.CopyResource(&output_texture, &final_texture_render_target)};
@@ -902,13 +925,11 @@ impl DXGIState {
         };
 
         // only debug print if there are not 4 million pixels lol
-        if (dimensions.width * dimensions.height) <= 256 {
+        if (dimensions.width * dimensions.height) <= 256*256 {
             let debug_slice: &[u64] = unsafe{ std::slice::from_raw_parts(px_data as *const _ as *const u64, px_data.len() / 8)};
 
             for px in debug_slice {
-                if *px != 0 {
-                    debug!("0x{:016X}", px);
-                }
+                debug!("0x{:016X}", px);
             }
         };
 
@@ -920,6 +941,14 @@ impl DXGIState {
 
             encoder.set_color(png::ColorType::Rgba);
             encoder.set_depth(png::BitDepth::Sixteen);
+            encoder.set_source_gamma(png::ScaledFloat::from_scaled(45455)); // 1.0 / 2.2, scaled by 100000
+            let source_chromaticities = png::SourceChromaticities::new(
+                (0.31270, 0.32900),
+                (0.64000, 0.33000),
+                (0.30000, 0.60000),
+                (0.15000, 0.06000)
+            );
+            encoder.set_source_chromaticities(source_chromaticities);
             let mut writer = match encoder.write_header() {
                 Ok(w) => w,
                 Err(e) => {
@@ -936,7 +965,7 @@ impl DXGIState {
         }
         debug!("Encoded image");
 
-        std::fs::write("img.png", &data);
+        std::fs::write("img.png", &data).ok();
 
         // create global memory
         unsafe {
