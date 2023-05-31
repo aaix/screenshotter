@@ -57,7 +57,7 @@ float4 PS_main(VertexOutput input) : SV_TARGET
 
 RWTexture2D<float4> conversionTexture: register(u1);
 
-RWBuffer<float> minmaxValues: register(u0);
+RWBuffer<float4> minmaxValues: register(u0);
 RWTexture2D<uint4> conversionOutputTexture: register(u2);
 
 [numthreads(1,1,1)]
@@ -70,8 +70,8 @@ void CS_convert_main(uint3 dispatchThreadID : SV_DispatchThreadID ) {
 
     uint2 texSize = uint2(width, height);
 
-    float minValue = minmaxValues[0];
-    float maxValue = minmaxValues[1];
+    float4 minValue = minmaxValues[0];
+    float4 maxValue = minmaxValues[1];
 
 
     for (uint y = 0; y < height; y+= 1) {
@@ -94,7 +94,7 @@ void CS_convert_main(uint3 dispatchThreadID : SV_DispatchThreadID ) {
 }
 
 // max threads is 1024
-groupshared float4 sumValues[1024];
+RWBuffer<float4> sumValues;
 
 [numthreads(1,1,1)]
 void CS_preprocess_main(uint3 dispatchThreadID: SV_DispatchThreadID, uint flatThreadID: SV_GROUPINDEX) {
@@ -105,12 +105,12 @@ void CS_preprocess_main(uint3 dispatchThreadID: SV_DispatchThreadID, uint flatTh
     uint height;
     conversionTexture.GetDimensions(width, height);
     
-    uint3 threads = uint3((width + 16 -1) / 16, (height + 16 -1) / 16, 1);
+    uint3 threads = uint3((width + 256 -1) / 256, (height + 256 -1) / 256, 1);
     uint num_threads = threads.x * threads.y * threads.z;
 
     float4 localSum = float4(0.0f, 0.0f, 0.0f, 0.0f);
 
-    uint3 thread_max = min((dispatchThreadID + 1) * 16 -1, float3(width, height, 1) - 1);
+    uint3 thread_max = min((dispatchThreadID + 1) * 256 -1, float3(width, height, 1) - 1);
 
     for (uint y = dispatchThreadID.y; y < thread_max.y; y++) {
         for (uint x = dispatchThreadID.x; x < thread_max.x; x++) {

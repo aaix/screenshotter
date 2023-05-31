@@ -813,12 +813,12 @@ impl DXGIState {
             let mut output: Option<ID3D11UnorderedAccessView> = None;
             self.device.CreateBuffer(
                 &D3D11_BUFFER_DESC {
-                    ByteWidth: std::mem::size_of::<f32>() as u32 * 2,
+                    ByteWidth: std::mem::size_of::<f32>() as u32 * 4 * 2,
                     Usage: D3D11_USAGE_DEFAULT,
                     BindFlags: D3D11_BIND_UNORDERED_ACCESS,
                     CPUAccessFlags: D3D11_CPU_ACCESS_READ,
                     MiscFlags: D3D11_RESOURCE_MISC_FLAG(0),
-                    StructureByteStride: std::mem::size_of::<f32>() as u32,
+                    StructureByteStride: std::mem::size_of::<f32>() as u32 * 4 ,
                 } as *const _,
                 None,
                 Some(&mut ppbuffer as *mut _)
@@ -826,7 +826,7 @@ impl DXGIState {
             self.device.CreateUnorderedAccessView(
                 ppbuffer.as_ref().unwrap(),
                 Some(&D3D11_UNORDERED_ACCESS_VIEW_DESC {
-                    Format: DXGI_FORMAT_R32_FLOAT,
+                    Format: DXGI_FORMAT_R32G32B32A32_FLOAT,
                     ViewDimension: D3D11_UAV_DIMENSION_BUFFER,
                     Anonymous: D3D11_UNORDERED_ACCESS_VIEW_DESC_0 { Buffer: D3D11_BUFFER_UAV {
                         FirstElement: 0,
@@ -895,29 +895,32 @@ impl DXGIState {
         }
 
         unsafe {
+
+            
+            let dispatch_x = (dimensions.width + 256 -1) / 256;
+            let dispatch_y = (dimensions.height + 256 -1) / 256;
+
+            debug!("dispatching threadpool {}x{}", dispatch_x, dispatch_y);
+
+
             // calc min max
             let before_minmax = Instant::now();
             self.device_context.CSSetShader(&self.compute_shaders.calculate_min_max, None);
-            self.device_context.Dispatch(1, 1, 1);
+            self.device_context.Dispatch(dispatch_x, dispatch_y, 1);
             self.device_context.Flush();
 
             {
                 let mut map = D3D11_MAPPED_SUBRESOURCE::default();
                 self.device_context.Map(&buf, 0, D3D11_MAP_READ, 0, Some(&mut map as *mut _))?;
 
-                let min: f32 = *(map.pData as *const _);
-                let max: f32 = *((map.pData as usize + 4) as *const _);
+                let min: &NormalisedRect = &*(map.pData as *const _);
+                let max: &NormalisedRect = &*((map.pData as usize + 4 * 4) as *const _);
+                debug!("min max : {:?} {:?}", min, max);
                 self.device_context.Unmap(&buf, 0);
-                debug!("min max : {} {}", min, max);
+
             }
 
             // convert texture (we spawn ceil(dimensions / 16))
-
-            let dispatch_x = (dimensions.width + 16 -1) / 16;
-            let dispatch_y = (dimensions.height + 16 -1) / 16;
-
-            debug!("dispatching threadpool {}x{}", dispatch_x, dispatch_y);
-
             let before_convert = Instant::now();
             self.device_context.CSSetShader(&self.compute_shaders.convert_resource, None);
             self.device_context.Dispatch(1, 1, 1);
