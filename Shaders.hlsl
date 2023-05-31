@@ -93,37 +93,57 @@ void CS_convert_main(uint3 dispatchThreadID : SV_DispatchThreadID ) {
     }
 }
 
+// max threads is 1024
+groupshared float4 sumValues[1024];
 
 [numthreads(1,1,1)]
-void CS_minmax_main(uint3 dispatchThreadID: SV_DispatchThreadID) {
+void CS_preprocess_main(uint3 dispatchThreadID: SV_DispatchThreadID, uint flatThreadID: SV_GROUPINDEX) {
+
+    sumValues[flatThreadID] = 0;
 
     uint width;
     uint height;
     conversionTexture.GetDimensions(width, height);
-    uint2 texDimensions = uint2(width, height);
+    
+    uint3 threads = uint3((width + 16 -1) / 16, (height + 16 -1) / 16, 1);
+    uint num_threads = threads.x * threads.y * threads.z;
 
-    // 16bit floating point max
-    float minValue = 0.0;
-    float maxValue = 1.0f;
+    float4 localSum = float4(0.0f, 0.0f, 0.0f, 0.0f);
 
-    for (uint y = 0; y < texDimensions.y; y++) {
-        for (uint x = 0; x < texDimensions.x; x++) {
+    uint3 thread_max = min((dispatchThreadID + 1) * 16 -1, float3(width, height, 1) - 1);
 
-            float4 px = conversionTexture.Load(float2(x,y));
-
-            // Update minimum value
-            minValue = min(minValue, min(min(px.r,px.g),min(px.b, px.a)));
-
-            // Update maximum value
-            maxValue = max(maxValue, max(max(px.r,px.g),max(px.b, px.a)));
+    for (uint y = dispatchThreadID.y; y < thread_max.y; y++) {
+        for (uint x = dispatchThreadID.x; x < thread_max.x; x++) {
+            localSum += conversionTexture.Load(x, y);
         }
+    }
+
+    // wait until all sums completed
+    sumValues[flatThreadID] = localSum;
+    GroupMemoryBarrierWithGroupSync();
+
+    uint i = 0;
+    for (uint active_threads = num_threads >> 1; active_threads > 0; active_threads >>= 1) {
+        if (flatThreadID < active_threads) {
+            uint cells_per_thread = num_threads / active_threads;
+
+            uint index = flatThreadID * cells_per_thread;
+            sumValues[index] = sumValues[index] + sumValues[index+(1 << i)];
+
+            i++;
+
+        }
+        GroupMemoryBarrierWithGroupSync();
     }
 
 
 
     // Store the result in the output buffer
 
-    minmaxValues[0] = minValue;
-    minmaxValues[1] = maxValue;
+    if (dispatchThreadID.x == 0 && dispatchThreadID.y == 0) {
+        minmaxValues[0] = sumValues[0];
+    }
+    
+
 
 }
