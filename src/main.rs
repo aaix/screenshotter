@@ -9,7 +9,7 @@ use windows::{
             Input::KeyboardAndMouse::{
                 VK_SNAPSHOT,
                 VIRTUAL_KEY,
-                self, VK_ESCAPE
+                self, VK_ESCAPE, VK_F11
             },
             WindowsAndMessaging::*
         },
@@ -41,7 +41,7 @@ use windows::{
 const VERTEX_SHADER_BYTECODE: &[u8] = include_bytes!("../compiled_shaders/VertexShader.cso");
 const PIXEL_SHADER_BYTECODE: &[u8] = include_bytes!("../compiled_shaders/PixelShader.cso");
 const COMPUTE_CONVERSION_SHADER_BYTECODE: &[u8] = include_bytes!("../compiled_shaders/ConvertShader.cso");
-const COMPUTE_MINMAX_SHADER_BYTECODE: &[u8] = include_bytes!("../compiled_shaders/MinMaxShader.cso");
+const COMPUTE_PREPROCESS_SHADER_BYTECODE: &[u8] = include_bytes!("../compiled_shaders/PreprocessShader.cso");
 
 
 macro_rules! debug {
@@ -63,21 +63,26 @@ fn main() {
     std::panic::set_hook(Box::new(|p| {
         debug!("{p}");
     }));
-    debug!("Hello, world!");
 
     #[cfg(debug_assertions)]
     {
         if let Err(e) = unsafe {LoadLibraryA(s!(r"C:\Program Files\Microsoft PIX\2305.10\WinPixGpuCapturer.dll"))} {
             debug!("Couldnt load PIX library {:?}", e)
+        } else {
+            debug!("Loaded pix !");
         };
     };
 
-    register_hotey(VK_SNAPSHOT);
+    register_hotey(VK_F11);
 
     let mut state = DXGIState::new().unwrap();
 
     debug!("{:?}", state.get_output_desc());
     debug!("Output dimensions are {:?}", state.get_output_desc().DesktopCoordinates.dimensions());
+
+
+    #[cfg(debug_assertions)]
+    debug!("Debug mode");
 
     let mut msg = MSG::default();
     loop {
@@ -257,7 +262,7 @@ impl DXGIState {
             let flags = D3D11_CREATE_DEVICE_SINGLETHREADED;
             
             #[cfg(debug_assertions)]
-            let flags: D3D11_CREATE_DEVICE_FLAG = D3D11_CREATE_DEVICE_DEBUG;
+            let flags: D3D11_CREATE_DEVICE_FLAG = D3D11_CREATE_DEVICE_DEBUG | D3D11_CREATE_DEVICE_DISABLE_GPU_TIMEOUT ;
 
             let swapchain_desc = DXGI_SWAP_CHAIN_DESC {
                 BufferDesc: DXGI_MODE_DESC {
@@ -293,7 +298,7 @@ impl DXGIState {
             D3D_DRIVER_TYPE_UNKNOWN,
             None,
             flags,
-            None,
+            Some(&[D3D_FEATURE_LEVEL_11_1]),
             D3D11_SDK_VERSION,
             Some(&swapchain_desc as *const _),
             Some(&mut swapchain as *mut _),
@@ -308,12 +313,21 @@ impl DXGIState {
             )
         };
 
+        let device_feature_level = unsafe {
+            let mut options = D3D11_FEATURE_DATA_D3D11_OPTIONS::default();
+            device.CheckFeatureSupport(D3D11_FEATURE_D3D11_OPTIONS, &mut options as *mut  _ as *mut _, std::mem::size_of_val(&options) as u32)?;
 
-        let (vertex_shader, pixel_shader, compute_conversion_shader, compute_minmax_shader) =unsafe {
+            options
+
+        };
+
+        debug!("Feature support {:?}", device_feature_level);
+
+        let (vertex_shader, pixel_shader, compute_conversion_shader, compute_preprocess_shader) =unsafe {
             let mut ppvertexshader: Option<ID3D11VertexShader> = None;
             let mut pppixelshader: Option<ID3D11PixelShader> = None;
             let mut conversion_shader: Option<ID3D11ComputeShader> = None;
-            let mut minmax_shader: Option<ID3D11ComputeShader> = None;
+            let mut preprocess_shader: Option<ID3D11ComputeShader> = None;
             device.CreateVertexShader(
                 VERTEX_SHADER_BYTECODE,
                 None,
@@ -330,11 +344,11 @@ impl DXGIState {
                 Some(&mut conversion_shader as *mut _)
             )?;
             device.CreateComputeShader(
-                COMPUTE_MINMAX_SHADER_BYTECODE,
+                COMPUTE_PREPROCESS_SHADER_BYTECODE,
                 None,
-                Some(&mut minmax_shader as *mut _)
+                Some(&mut preprocess_shader as *mut _)
             )?;
-            (ppvertexshader.unwrap(), pppixelshader.unwrap(), conversion_shader.unwrap(), minmax_shader.unwrap())
+            (ppvertexshader.unwrap(), pppixelshader.unwrap(), conversion_shader.unwrap(), preprocess_shader.unwrap())
         };
 
         let sampler = unsafe {
@@ -423,7 +437,8 @@ impl DXGIState {
             D3D11_USAGE_DEFAULT,
             D3D11_CPU_ACCESS_NONE,
             D3D11_BIND_RENDER_TARGET,
-            DXGI_FORMAT_R16G16B16A16_FLOAT
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+            1
         ).unwrap();
 
         let render_target_view = unsafe {
@@ -525,7 +540,7 @@ impl DXGIState {
             swapchain,
             render_target,
             compute_shaders: ComputeResource {
-                calculate_min_max: compute_minmax_shader,
+                preprocessor: compute_preprocess_shader,
                 convert_resource: compute_conversion_shader,
             },
             screenshot: None,
@@ -549,6 +564,7 @@ impl DXGIState {
     fn show_window(&self) -> bool {
         let res = unsafe {ShowWindow(self.window, SW_SHOW)}.as_bool();
         unsafe {SetForegroundWindow(self.window)};
+        unsafe {SetCursor(LoadCursorW(None, IDC_ARROW).unwrap())};
         unsafe {KeyboardAndMouse::SetCapture(self.window)};
         res
     }
@@ -668,7 +684,8 @@ impl DXGIState {
             D3D11_USAGE_DEFAULT,
             D3D11_CPU_ACCESS_NONE,
             D3D11_BIND_SHADER_RESOURCE,
-            DXGI_FORMAT_R16G16B16A16_FLOAT
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+            1
         )?;
 
         unsafe {self.device_context.CopyResource(&screencap, &resource)}
@@ -776,13 +793,14 @@ impl DXGIState {
 
 
         
-        let sub_texture = Self::create_texture(
+        let input_texture = Self::create_texture(
             &self.device,
             &dimensions,
             D3D11_USAGE_DEFAULT,
             D3D11_CPU_ACCESS_NONE,
-            D3D11_BIND_UNORDERED_ACCESS,
+            D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET,
             DXGI_FORMAT_R16G16B16A16_FLOAT,
+            0
         ).unwrap();
 
 
@@ -793,6 +811,7 @@ impl DXGIState {
             D3D11_CPU_ACCESS_NONE,
             D3D11_BIND_UNORDERED_ACCESS,
             DXGI_FORMAT_R16G16B16A16_TYPELESS,
+            1,
         ).unwrap();
 
 
@@ -803,10 +822,11 @@ impl DXGIState {
             D3D11_CPU_ACCESS_READ,
             D3D11_BIND_FLAG(0),
             DXGI_FORMAT_R16G16B16A16_TYPELESS,
+            1
         ).unwrap();
 
 
-        let (uav, input_view, output_view, buf) = unsafe {
+        let (uav, input_view, output_view, buf, thread_buffer, thread_view) = unsafe {
             let mut ppbuffer: Option<ID3D11Buffer> = None;
             let mut uav: Option<ID3D11UnorderedAccessView> = None;
             let mut input: Option<ID3D11UnorderedAccessView> = None;
@@ -817,8 +837,8 @@ impl DXGIState {
                     Usage: D3D11_USAGE_DEFAULT,
                     BindFlags: D3D11_BIND_UNORDERED_ACCESS,
                     CPUAccessFlags: D3D11_CPU_ACCESS_READ,
-                    MiscFlags: D3D11_RESOURCE_MISC_FLAG(0),
-                    StructureByteStride: std::mem::size_of::<f32>() as u32 * 4 ,
+                    MiscFlags: D3D11_RESOURCE_MISC_BUFFER_STRUCTURED,
+                    StructureByteStride: std::mem::size_of::<f32>() as u32 ,
                 } as *const _,
                 None,
                 Some(&mut ppbuffer as *mut _)
@@ -826,7 +846,7 @@ impl DXGIState {
             self.device.CreateUnorderedAccessView(
                 ppbuffer.as_ref().unwrap(),
                 Some(&D3D11_UNORDERED_ACCESS_VIEW_DESC {
-                    Format: DXGI_FORMAT_R32G32B32A32_FLOAT,
+                    Format: DXGI_FORMAT_UNKNOWN,
                     ViewDimension: D3D11_UAV_DIMENSION_BUFFER,
                     Anonymous: D3D11_UNORDERED_ACCESS_VIEW_DESC_0 { Buffer: D3D11_BUFFER_UAV {
                         FirstElement: 0,
@@ -837,7 +857,7 @@ impl DXGIState {
                 Some(&mut uav as *mut _)
             )?;
             self.device.CreateUnorderedAccessView(
-                &sub_texture,
+                &input_texture,
                 Some(&D3D11_UNORDERED_ACCESS_VIEW_DESC {
                     Format: DXGI_FORMAT_R16G16B16A16_FLOAT,
                     ViewDimension: D3D11_UAV_DIMENSION_TEXTURE2D,
@@ -860,13 +880,42 @@ impl DXGIState {
                 Some(&mut output as *mut _)
             )?;
 
-            (uav.unwrap(), input.unwrap(), output.unwrap(), ppbuffer.unwrap())
+            let mut thread_buff: Option<ID3D11Buffer> = None;
+            let mut thread_view: Option<ID3D11UnorderedAccessView> = None;
+
+            self.device.CreateBuffer(
+                &D3D11_BUFFER_DESC {
+                    ByteWidth: std::mem::size_of::<f32>() as u32 * 1024,
+                    Usage: D3D11_USAGE_DEFAULT,
+                    BindFlags: D3D11_BIND_UNORDERED_ACCESS,
+                    CPUAccessFlags: D3D11_CPU_ACCESS_READ,
+                    MiscFlags: D3D11_RESOURCE_MISC_BUFFER_STRUCTURED,
+                    StructureByteStride: std::mem::size_of::<f32>() as u32 ,
+                } as *const _,
+                None,
+                Some(&mut thread_buff as *mut _)
+            )?;
+            self.device.CreateUnorderedAccessView(
+                thread_buff.as_ref().unwrap(),
+                Some(&D3D11_UNORDERED_ACCESS_VIEW_DESC {
+                    Format: DXGI_FORMAT_UNKNOWN,
+                    ViewDimension: D3D11_UAV_DIMENSION_BUFFER,
+                    Anonymous: D3D11_UNORDERED_ACCESS_VIEW_DESC_0 { Buffer: D3D11_BUFFER_UAV {
+                        FirstElement: 0,
+                        NumElements: 2,
+                        Flags: 0
+                    }},
+                } as *const _),
+                Some(&mut thread_view as *mut _)
+            )?;
+
+            (uav.unwrap(), input.unwrap(), output.unwrap(), ppbuffer.unwrap(), thread_buff.unwrap(), thread_view.unwrap())
         };
 
 
         unsafe {
             self.device_context.CopySubresourceRegion(
-                &sub_texture,
+                &input_texture,
                 0,
                 0,
                 0,
@@ -880,54 +929,69 @@ impl DXGIState {
 
         unsafe {
 
-            let views: [Option<ID3D11UnorderedAccessView>; 3] = [
+            let views: [Option<ID3D11UnorderedAccessView>; 4] = [
                 Some(uav),
                 Some(input_view),
-                Some(output_view)
+                Some(output_view),
+                Some(thread_view)
             ];
 
             self.device_context.CSSetUnorderedAccessViews(
                 0,
-                3,
+                4,
                 Some(views.as_ptr()),
                 None,
             )
         }
 
+        // generate mips
+        unsafe {
+            let mut srv: Option<ID3D11ShaderResourceView> = None;
+            self.device.CreateShaderResourceView(
+                &input_texture,
+                Some(&D3D11_SHADER_RESOURCE_VIEW_DESC{
+                    Format: DXGI_FORMAT_UNKNOWN,
+                    ViewDimension: D3D_SRV_DIMENSION_TEXTURE2D,
+                    Anonymous: D3D11_SHADER_RESOURCE_VIEW_DESC_0 {
+                        Texture2D: D3D11_TEX2D_SRV {
+                            MostDetailedMip: 0,
+                            MipLevels: -1i32 as u32,
+                        }
+                    },
+                } as *const _),
+                Some(&mut srv as *mut _)
+            )?;
+            
+            self.device_context.GenerateMips(&srv.unwrap());
+        }
+
         unsafe {
 
-            
-            let dispatch_x = (dimensions.width + 256 -1) / 256;
-            let dispatch_y = (dimensions.height + 256 -1) / 256;
-
-            debug!("dispatching threadpool {}x{}", dispatch_x, dispatch_y);
 
 
-            // calc min max
-            let before_minmax = Instant::now();
-            self.device_context.CSSetShader(&self.compute_shaders.calculate_min_max, None);
-            self.device_context.Dispatch(dispatch_x, dispatch_y, 1);
+            // run preprocessor
+            let before_preprocess = Instant::now();
+            self.device_context.CSSetShader(&self.compute_shaders.preprocessor, None);
+            self.device_context.Dispatch(1, 1, 1);
             self.device_context.Flush();
 
             {
                 let mut map = D3D11_MAPPED_SUBRESOURCE::default();
                 self.device_context.Map(&buf, 0, D3D11_MAP_READ, 0, Some(&mut map as *mut _))?;
 
-                let min: &NormalisedRect = &*(map.pData as *const _);
-                let max: &NormalisedRect = &*((map.pData as usize + 4 * 4) as *const _);
-                debug!("min max : {:?} {:?}", min, max);
+                let preprocessor_buff = std::slice::from_raw_parts(map.pData as *const f32, map.RowPitch as usize / 4);
+                debug!("preprocessor results : {:?}", preprocessor_buff);
                 self.device_context.Unmap(&buf, 0);
 
             }
 
-            // convert texture (we spawn ceil(dimensions / 16))
             let before_convert = Instant::now();
             self.device_context.CSSetShader(&self.compute_shaders.convert_resource, None);
             self.device_context.Dispatch(1, 1, 1);
             self.device_context.Flush();
 
             let after_compute = Instant::now();
-            debug!("Compute shaders ran in {:?} | MinMax: {:?}, Convert: {:?}", after_compute - before_minmax, before_convert - before_minmax, after_compute - before_convert)
+            debug!("Compute shaders ran in {:?} (Preprocessor: {:?}, Convert: {:?})", after_compute - before_preprocess, before_convert - before_preprocess, after_compute - before_convert)
         }
 
 
@@ -948,7 +1012,7 @@ impl DXGIState {
             pmappedresource
         };
 
-        debug!("mapped to {:?}", map);
+        //debug!("mapped to {:?}", map);
 
         let px_data: &[u8] = unsafe {
             std::slice::from_raw_parts(
@@ -957,8 +1021,10 @@ impl DXGIState {
             )
         };
 
+        debug!("px_data len {}",px_data.len());
+
         // only debug print if there are not 4 million pixels lol
-        if (dimensions.width * dimensions.height) <= 256*256 {
+        if (dimensions.width * dimensions.height) <= 16*16 {
             let debug_slice: &[u64] = unsafe{ std::slice::from_raw_parts(px_data as *const _ as *const u64, px_data.len() / 8)};
 
             for px in debug_slice {
@@ -1042,7 +1108,8 @@ impl DXGIState {
         usage: D3D11_USAGE,
         cpu_access: D3D11_CPU_ACCESS_FLAG,
         bind_flags: D3D11_BIND_FLAG,
-        format: DXGI_FORMAT
+        format: DXGI_FORMAT,
+        mipmap: u32
     ) -> Result<ID3D11Texture2D1, Box<dyn Error>> {
         Ok(unsafe {
             let mut texture: Option<ID3D11Texture2D1> = None;
@@ -1050,7 +1117,7 @@ impl DXGIState {
                 &D3D11_TEXTURE2D_DESC1 {
                     Width: dimensions.width,
                     Height: dimensions.height,
-                    MipLevels: 1,
+                    MipLevels: mipmap,
                     ArraySize: 1,
                     Format: format,
                     SampleDesc: DXGI_SAMPLE_DESC {
@@ -1060,7 +1127,13 @@ impl DXGIState {
                     Usage: usage,
                     BindFlags: bind_flags,
                     CPUAccessFlags: cpu_access,
-                    MiscFlags: D3D11_RESOURCE_MISC_FLAG(0),
+                    MiscFlags: {
+                        if mipmap != 1 {
+                            D3D11_RESOURCE_MISC_GENERATE_MIPS
+                        } else {
+                            D3D11_RESOURCE_MISC_FLAG(0)
+                        }
+                    },
                     TextureLayout: D3D11_TEXTURE_LAYOUT_UNDEFINED,
                 } as *const _,
                 None,
@@ -1149,6 +1222,10 @@ impl Default for NormalisedRect {
 }
 
 struct ComputeResource {
-    calculate_min_max: ID3D11ComputeShader,
+    preprocessor: ID3D11ComputeShader,
     convert_resource: ID3D11ComputeShader, 
+}
+
+fn greater_p2(x: u32) -> u32 {
+    1 << (32 - (x-1).leading_zeros())
 }

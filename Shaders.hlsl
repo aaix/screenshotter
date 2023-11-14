@@ -56,94 +56,41 @@ float4 PS_main(VertexOutput input) : SV_TARGET
 }
 
 RWTexture2D<float4> conversionTexture: register(u1);
-
-RWBuffer<float4> minmaxValues: register(u0);
+RWStructuredBuffer<float> preprocessorOutput: register(u0);
 RWTexture2D<uint4> conversionOutputTexture: register(u2);
 
-[numthreads(1,1,1)]
-void CS_convert_main(uint3 dispatchThreadID : SV_DispatchThreadID ) {
+#define THREAD_COUNT 1024
+#define THREAD_COUNT_X 32
+#define THREAD_COUNT_Y 32
+
+
+[numthreads(1, 1, 1)]
+void CS_convert_main(uint3 threadID: SV_GROUPTHREADID, uint flatThreadID: SV_GROUPINDEX) {  
 
     uint width;
     uint height;
-
     conversionTexture.GetDimensions(width, height);
 
-    uint2 texSize = uint2(width, height);
-
-    float4 minValue = minmaxValues[0];
-    float4 maxValue = minmaxValues[1];
-
-
-    for (uint y = 0; y < height; y+= 1) {
-        for (uint x = 0; x < width; x+= 1) {
-
-
-            // sample
-            {
-                uint2 pos = uint2(x,y);
-                float4 px = conversionTexture.Load(pos);
-                
-                float4 normalisedValue = (px.rgba - minValue) / (maxValue - minValue);
-                uint4 uintValue = uint4(normalisedValue * 0xFFFF);
-
-
-                conversionOutputTexture[pos] = uintValue;
-            }
+    for (uint y = thread_start.y; y < thread_max.y; y++) {
+        for (uint x = thread_start.x; x < thread_max.x; x++) {
+            float4 px = conversionTexture.Load(x,y);
+            conversionOutputTexture[uint2(x,y)] = uint4(255,0,0,255);
         }
     }
 }
 
-// max threads is 1024
-RWBuffer<float4> sumValues;
-
-[numthreads(1,1,1)]
-void CS_preprocess_main(uint3 dispatchThreadID: SV_DispatchThreadID, uint flatThreadID: SV_GROUPINDEX) {
-
-    sumValues[flatThreadID] = 0;
+[numthreads(1, 1, 1)]
+void CS_preprocess_main(uint3 threadID: SV_GROUPTHREADID, uint flatThreadID: SV_GROUPINDEX) {
 
     uint width;
     uint height;
     conversionTexture.GetDimensions(width, height);
-    
-    uint3 threads = uint3((width + 256 -1) / 256, (height + 256 -1) / 256, 1);
-    uint num_threads = threads.x * threads.y * threads.z;
 
-    float4 localSum = float4(0.0f, 0.0f, 0.0f, 0.0f);
+    uint mip = (32 - firstbithigh(max(width, height)))-1;
 
-    uint3 thread_max = min((dispatchThreadID + 1) * 256 -1, float3(width, height, 1) - 1);
+    float4 px = conversionTexture.Load(uint2(1,1), mip);
 
-    for (uint y = dispatchThreadID.y; y < thread_max.y; y++) {
-        for (uint x = dispatchThreadID.x; x < thread_max.x; x++) {
-            localSum += conversionTexture.Load(x, y);
-        }
-    }
+    float luminance = px.r * 0.2126 + px.g * 0.7152 + px.b * 0.0722;
 
-    // wait until all sums completed
-    sumValues[flatThreadID] = localSum;
-    GroupMemoryBarrierWithGroupSync();
-
-    uint i = 0;
-    for (uint active_threads = num_threads >> 1; active_threads > 0; active_threads >>= 1) {
-        if (flatThreadID < active_threads) {
-            uint cells_per_thread = num_threads / active_threads;
-
-            uint index = flatThreadID * cells_per_thread;
-            sumValues[index] = sumValues[index] + sumValues[index+(1 << i)];
-
-            i++;
-
-        }
-        GroupMemoryBarrierWithGroupSync();
-    }
-
-
-
-    // Store the result in the output buffer
-
-    if (dispatchThreadID.x == 0 && dispatchThreadID.y == 0) {
-        minmaxValues[0] = sumValues[0];
-    }
-    
-
-
+    preprocessorOutput[0] = luminance;
 }
