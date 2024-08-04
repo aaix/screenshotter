@@ -850,7 +850,7 @@ impl DXGIState {
                     ViewDimension: D3D11_UAV_DIMENSION_BUFFER,
                     Anonymous: D3D11_UNORDERED_ACCESS_VIEW_DESC_0 { Buffer: D3D11_BUFFER_UAV {
                         FirstElement: 0,
-                        NumElements: 2,
+                        NumElements: 1,
                         Flags: 0
                     }},
                 } as *const _),
@@ -1021,17 +1021,34 @@ impl DXGIState {
             )
         };
 
-        debug!("px_data len {}",px_data.len());
+        debug!("map is {:?}", map);
+
+        debug!("px_data len {}", px_data.len());
+
+        let u64_data: &[u64] = unsafe { std::slice::from_raw_parts(px_data as *const _ as *const u64, px_data.len() / 8)};
 
         // only debug print if there are not 4 million pixels lol
         if (dimensions.width * dimensions.height) <= 16*16 {
-            let debug_slice: &[u64] = unsafe{ std::slice::from_raw_parts(px_data as *const _ as *const u64, px_data.len() / 8)};
-
-            for px in debug_slice {
+            for px in u64_data {
                 debug!("0x{:016X}", px);
             }
         };
 
+        // remove padding because rows are alligned to 16 bytes
+
+        
+        let mut heap_data = Vec::from(u64_data);
+
+        heap_data.retain(|px| {
+            *px != 0
+        });
+
+        let px_data: &[u8] = unsafe {
+            std::slice::from_raw_parts(
+                heap_data.as_ptr() as *const u8,
+                heap_data.len() * 8
+            )
+        };
 
         let before_encoding = Instant::now();
 
@@ -1042,7 +1059,7 @@ impl DXGIState {
 
             encoder.set_color(png::ColorType::Rgba);
             encoder.set_depth(png::BitDepth::Sixteen);
-            encoder.set_source_gamma(png::ScaledFloat::from_scaled(45455)); // 1.0 / 2.2, scaled by 100000
+            encoder.set_source_gamma(png::ScaledFloat::from_scaled(45454));
             let source_chromaticities = png::SourceChromaticities::new(
                 (0.31270, 0.32900),
                 (0.64000, 0.33000),
@@ -1059,8 +1076,8 @@ impl DXGIState {
             };
 
 
-            // our data has rows aligned to 16 bits
-            let res = writer.write_image_data_with_aligned_rows(px_data, 16, dimensions.width as usize);
+            // our data has rows aligned to 16 bytes
+            let res = writer.write_image_data(&px_data);
             unsafe {self.device_context.Unmap(&final_staging_texture, 0);};
             res?;
         }
@@ -1081,12 +1098,12 @@ impl DXGIState {
                     Memory::GlobalFree(handle)?;
                     return Err("Unable to lock global memory".into());
                 }
-                std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
+                std::ptr::copy(data.as_ptr(), ptr as *mut u8, data.len());
                 Memory::GlobalUnlock(handle);
 
 
                 let format = {
-                    DataExchange::RegisterClipboardFormatA(s!("image/png"))
+                    DataExchange::RegisterClipboardFormatA(s!("png"))
 
                 };
 
@@ -1094,6 +1111,7 @@ impl DXGIState {
 
                 let res = DataExchange::SetClipboardData(format, Foundation::HANDLE(handle.0));
                 DataExchange::CloseClipboard();
+                debug!("set clipboard res: {:?}", res);
                 res?;
             }
         }

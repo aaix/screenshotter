@@ -6,7 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-png = { git="https://github.com/aaix/image-png-rs"}
+png = "0.17.13"
 
 [dependencies.windows]
 version = "0.48"

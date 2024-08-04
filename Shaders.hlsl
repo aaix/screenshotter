@@ -55,26 +55,45 @@ float4 PS_main(VertexOutput input) : SV_TARGET
     
 }
 
-RWTexture2D<float4> conversionTexture: register(u1);
-RWStructuredBuffer<float> preprocessorOutput: register(u0);
-RWTexture2D<uint4> conversionOutputTexture: register(u2);
+RWTexture2D<float4> conversionTexture : register(u1);
+RWStructuredBuffer<float> preprocessorOutput : register(u0);
+RWTexture2D<uint4> conversionOutputTexture : register(u2);
 
-#define THREAD_COUNT 1024
 #define THREAD_COUNT_X 32
 #define THREAD_COUNT_Y 32
+#define BLOCK_SIZE 128
 
-
-[numthreads(1, 1, 1)]
-void CS_convert_main(uint3 threadID: SV_GROUPTHREADID, uint flatThreadID: SV_GROUPINDEX) {  
-
-    uint width;
-    uint height;
+[numthreads(THREAD_COUNT_X, THREAD_COUNT_Y, 1)]
+void CS_convert_main(uint3 groupID : SV_GroupID, uint3 groupThreadID : SV_GroupThreadID, uint3 dispatchThreadID : SV_DispatchThreadID) {
+    uint width, height;
     conversionTexture.GetDimensions(width, height);
 
-    for (uint y = thread_start.y; y < thread_max.y; y++) {
-        for (uint x = thread_start.x; x < thread_max.x; x++) {
-            float4 px = conversionTexture.Load(x,y);
-            conversionOutputTexture[uint2(x,y)] = uint4(255,0,0,255);
+    // Calculate the top-left corner of the block this thread processes
+    uint baseX = dispatchThreadID.x * BLOCK_SIZE;
+    uint baseY = dispatchThreadID.y * BLOCK_SIZE;
+
+    float maxLuminosity = preprocessorOutput[0];
+
+    for (uint i = 0; i < BLOCK_SIZE; ++i) {
+        for (uint j = 0; j < BLOCK_SIZE; ++j) {
+            uint x = baseX + i;
+            uint y = baseY + j;
+
+            if (x < width && y < height) {
+                float4 hdrPixel = conversionTexture.Load(int3(x, y, 0));
+
+                // Normalize the pixel values to convert from HDR to SDR
+                float3 sdrColor = hdrPixel.rgb / maxLuminosity;
+
+                // Ensure the pixel values are within the [0, 1] range
+                sdrColor = clamp(sdrColor, 0.0f, 1.0f);
+
+                // Convert to 8-bit color
+                uint4 sdrPixel = uint4(sdrColor * 255.0f, 255.0f);
+
+                // Write the SDR pixel to the output texture
+                conversionOutputTexture[uint2(x, y)] = sdrPixel;
+            }
         }
     }
 }
@@ -90,7 +109,7 @@ void CS_preprocess_main(uint3 threadID: SV_GROUPTHREADID, uint flatThreadID: SV_
 
     float4 px = conversionTexture.Load(uint2(1,1), mip);
 
-    float luminance = px.r * 0.2126 + px.g * 0.7152 + px.b * 0.0722;
+    float luminance = px.r * 0.2 + px.g * 0.7 + px.b * 0.1;
 
-    preprocessorOutput[0] = luminance;
+    preprocessorOutput[0] = px.r;
 }
